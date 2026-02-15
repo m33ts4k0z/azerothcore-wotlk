@@ -18,11 +18,12 @@
 #ifndef DEF_EYE_OF_ETERNITY_H
 #define DEF_EYE_OF_ETERNITY_H
 
-#include "Chat.h"
 #include "CreatureAIImpl.h"
 
 #define DataHeader "EOE"
 #define EyeOfEternityScriptName "instance_eye_of_eternity"
+
+uint32 const EncounterCount = 1;
 
 enum Objects
 {
@@ -52,8 +53,8 @@ enum NPCs
 
 enum Data
 {
+    DATA_MALYGOS                = 0,
     DATA_IRIS_ACTIVATED,
-    DATA_ENCOUNTER_STATUS,
     DATA_SET_IRIS_INACTIVE,
     DATA_HIDE_IRIS_AND_PORTAL,
     DATA_MALYGOS_GUID,
@@ -87,9 +88,30 @@ enum eAchiev
     ACHIEV_YOU_DONT_HAVE_AN_ENTERNITY_EVENT = 20387,
 };
 
-/*** POSITIONS/WAYPOINTS BELOW ***/
+enum EoEMisc : uint32
+{
+    AREA_EYE_OF_ETERNITY                    = 4500,
+    EVENT_IRIS_ACTIVATED                    = 20158,
+    PLATFORM_DESTROY_DAMAGE                 = 6500000,
+    INTRO_MOVEMENT_INTERVAL                 = 25000,
+};
 
-#define INTRO_MOVEMENT_INTERVAL 25000
+enum EoEActions
+{
+    ACTION_POWER_SPARK_FOLLOW   = 1,
+    ACTION_POWER_SPARK_STOP     = 2,
+    ACTION_DISK_START_MOVING    = 1,
+};
+
+enum AlexstraszaEvents
+{
+    EVENT_ALEXSTRASZA_GIFT      = 1,
+    EVENT_ALEXSTRASZA_SAY_TWO   = 2,
+    EVENT_ALEXSTRASZA_SAY_THREE = 3,
+    EVENT_ALEXSTRASZA_SAY_FOUR  = 4,
+};
+
+/*** POSITIONS/WAYPOINTS BELOW ***/
 
 const Position CenterPos = {754.395f, 1301.27f, 266.10f, 0.0f};
 
@@ -102,6 +124,9 @@ const Position FourSidesPos[] =
 };
 
 const Position Phase2NorthPos = {837.22f, 1301.676f, 296.10f, M_PI};
+
+const Position AlexstraszaGiftPos = {773.98f, 1285.97f, 266.254f, 0.0f};
+const Position HeartOfMagicPos = {773.98f, 1275.97f, 266.254f, 0.0f};
 
 const uint32 MalygosIntroIntervals[] = {18000, 19000, 21000, 18000, 15000};
 
