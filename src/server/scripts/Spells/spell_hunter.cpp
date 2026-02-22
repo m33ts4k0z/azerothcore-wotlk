@@ -1193,9 +1193,8 @@ class spell_hun_lock_and_load : public AuraScript
         if (!(eventInfo.GetTypeMask() & PROC_FLAG_DONE_TRAP_ACTIVATION))
             return false;
 
-        // Do not proc on traps for immolation/explosive trap
         SpellInfo const* spellInfo = eventInfo.GetSpellInfo();
-        if (!spellInfo || !(spellInfo->GetSchoolMask() & SPELL_SCHOOL_MASK_FROST))
+        if (!spellInfo || !(spellInfo->GetSchoolMask() & (SPELL_SCHOOL_MASK_FROST | SPELL_SCHOOL_MASK_FIRE)))
             return false;
 
         return roll_chance_i(aurEff->GetAmount());
@@ -1349,10 +1348,13 @@ class spell_hun_thrill_of_the_hunt : public AuraScript
                 return;
             }
             if (AuraEffect const* pEff = victim->GetAuraEffect(SPELL_AURA_PERIODIC_DUMMY, SPELLFAMILY_HUNTER, 0x0, 0x80000000, 0x0, caster->GetGUID()))
-                mana = pEff->GetSpellInfo()->CalcPowerCost(caster, SpellSchoolMask(pEff->GetSpellInfo()->SchoolMask)) * 4 / 10 / 3;
+            {
+                SpellInfo const* expSpell = pEff->GetSpellInfo();
+                mana = (expSpell->ManaCost + int32(CalculatePct(caster->GetCreateMana(), expSpell->ManaCostPercentage))) * 4 / 10 / 3;
+            }
         }
         else
-            mana = procSpell->CalcPowerCost(caster, SpellSchoolMask(procSpell->SchoolMask)) * 4 / 10;
+            mana = (procSpell->ManaCost + int32(CalculatePct(caster->GetCreateMana(), procSpell->ManaCostPercentage))) * 4 / 10;
 
         if (spell)
             caster->ToPlayer()->SetSpellModTakingSpell(spell, true);
