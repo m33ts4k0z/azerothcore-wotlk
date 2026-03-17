@@ -17,16 +17,16 @@ if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 echo [3/4] Merging ac/master...
 git merge ac/master --no-edit
 if %ERRORLEVEL% neq 0 (
-    echo CONFLICT: Detected in ac/master. Aborting merge.
-    git merge --abort
+    echo CONFLICT: Detected in ac/master. Merge state has been kept for later review.
+    echo Run `git status` to inspect conflicted files, resolve them when ready, then continue with `git merge --continue`.
     exit /b 1
 )
 
 echo [4/4] Merging playerbots/Playerbot...
 git merge playerbots/Playerbot --no-edit
 if %ERRORLEVEL% neq 0 (
-    echo CONFLICT: Detected in playerbots/Playerbot. Aborting merge.
-    git merge --abort
+    echo CONFLICT: Detected in playerbots/Playerbot. Merge state has been kept for later review.
+    echo Run `git status` to inspect conflicted files, resolve them when ready, then continue with `git merge --continue`.
     exit /b 1
 )
 
