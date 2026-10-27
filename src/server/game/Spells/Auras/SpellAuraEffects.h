@@ -115,6 +115,7 @@ public:
 
     int32 GetOldAmount() const { return m_oldAmount; }
     void SetOldAmount(int32 amount) { m_oldAmount = amount; }
+    [[nodiscard]] bool IsEnabled() const { return m_isAuraEnabled; }
     void SetEnabled(bool enabled) { m_isAuraEnabled = enabled; }
 
 private:
@@ -206,6 +207,7 @@ public:
     void HandleModThreat(AuraApplication const* aurApp, uint8 mode, bool apply) const;
     void HandleAuraModTotalThreat(AuraApplication const* aurApp, uint8 mode, bool apply) const;
     void HandleModTaunt(AuraApplication const* aurApp, uint8 mode, bool apply) const;
+    void HandleModDetaunt(AuraApplication const* aurApp, uint8 mode, bool apply) const;
     //  control
     void HandleModConfuse(AuraApplication const* aurApp, uint8 mode, bool apply) const;
     void HandleModFear(AuraApplication const* aurApp, uint8 mode, bool apply) const;

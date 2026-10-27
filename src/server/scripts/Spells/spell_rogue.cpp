@@ -17,7 +17,6 @@
 
 #include "AreaDefines.h"
 #include "CellImpl.h"
-#include "CreatureScript.h"
 #include "GameTime.h"
 #include "GridNotifiers.h"
 #include "SpellAuraEffects.h"
@@ -42,6 +41,7 @@ enum RogueSpells
     SPELL_ROGUE_KILLING_SPREE_DMG_BUFF          = 61851,
     SPELL_ROGUE_PREY_ON_THE_WEAK                = 58670,
     SPELL_ROGUE_SHIV_TRIGGERED                  = 5940,
+    SPELL_ROGUE_TRICKS_OF_THE_TRADE             = 57934,
     SPELL_ROGUE_TRICKS_OF_THE_TRADE_DMG_BOOST   = 57933,
     SPELL_ROGUE_TRICKS_OF_THE_TRADE_PROC        = 59628,
     // Proc system spells
@@ -54,7 +54,8 @@ enum RogueSpells
     SPELL_ROGUE_OVERKILL_TRIGGERED              = 58427,
     SPELL_ROGUE_HONOR_AMONG_THIEVES_PROC        = 52916,
     SPELL_ROGUE_HONOR_AMONG_THIEVES_TRIGGERED   = 51699,
-    SPELL_ROGUE_COLD_BLOOD                      = 14177
+    SPELL_ROGUE_COLD_BLOOD                      = 14177,
+    SPELL_ROGUE_REMORSELESS_ATTACKS_R1          = 14143
 };
 
 enum RogueSpellIcons
@@ -616,53 +617,68 @@ class spell_rog_shiv : public SpellScript
     }
 };
 
-// 57934 - Tricks of the Trade
-class spell_rog_tricks_of_the_trade : public AuraScript
+// 57934 - Tricks of the Trade (AuraScript)
+class spell_rog_tricks_of_the_trade_aura : public AuraScript
 {
-    PrepareAuraScript(spell_rog_tricks_of_the_trade);
+    PrepareAuraScript(spell_rog_tricks_of_the_trade_aura);
 
     bool Validate(SpellInfo const* /*spellInfo*/) override
     {
         return ValidateSpellInfo({ SPELL_ROGUE_TRICKS_OF_THE_TRADE_DMG_BOOST, SPELL_ROGUE_TRICKS_OF_THE_TRADE_PROC });
     }
 
-    bool Load() override
-    {
-        _redirectTarget = nullptr;
-        return true;
-    }
-
     void OnRemove(AuraEffect const* /*aurEff*/, AuraEffectHandleModes /*mode*/)
     {
-        if (GetTargetApplication()->GetRemoveMode() != AURA_REMOVE_BY_DEFAULT)
-            GetTarget()->ResetRedirectThreat();
+        if (GetTargetApplication()->GetRemoveMode() != AURA_REMOVE_BY_DEFAULT || !GetTarget()->HasAura(SPELL_ROGUE_TRICKS_OF_THE_TRADE_PROC))
+            GetTarget()->GetThreatMgr().UnregisterRedirectThreat(SPELL_ROGUE_TRICKS_OF_THE_TRADE);
     }
 
-    bool CheckProc(ProcEventInfo& /*eventInfo*/)
-    {
-        _redirectTarget = GetTarget()->GetRedirectThreatTarget();
-        return _redirectTarget;
-    }
-
-    void HandleProc(AuraEffect const* /*aurEff*/, ProcEventInfo& /*eventInfo*/)
+    void HandleProc(AuraEffect const* aurEff, ProcEventInfo& /*eventInfo*/)
     {
         PreventDefaultAction();
 
-        Unit* target = GetTarget();
-        target->CastSpell(_redirectTarget, SPELL_ROGUE_TRICKS_OF_THE_TRADE_DMG_BOOST, true);
-        target->CastSpell(target, SPELL_ROGUE_TRICKS_OF_THE_TRADE_PROC, true);
-        Remove(AURA_REMOVE_BY_DEFAULT); // maybe handle by proc charges
+        Unit* rogue = GetTarget();
+        Unit* target = ObjectAccessor::GetUnit(*rogue, _redirectTarget);
+        if (target)
+        {
+            rogue->CastSpell(target, SPELL_ROGUE_TRICKS_OF_THE_TRADE_DMG_BOOST, true, nullptr, aurEff);
+            rogue->CastSpell(rogue, SPELL_ROGUE_TRICKS_OF_THE_TRADE_PROC, true, nullptr, aurEff);
+        }
+        Remove(AURA_REMOVE_BY_DEFAULT);
     }
 
     void Register() override
     {
-        AfterEffectRemove += AuraEffectRemoveFn(spell_rog_tricks_of_the_trade::OnRemove, EFFECT_1, SPELL_AURA_DUMMY, AURA_EFFECT_HANDLE_REAL);
-        DoCheckProc += AuraCheckProcFn(spell_rog_tricks_of_the_trade::CheckProc);
-        OnEffectProc += AuraEffectProcFn(spell_rog_tricks_of_the_trade::HandleProc, EFFECT_1, SPELL_AURA_DUMMY);
+        AfterEffectRemove += AuraEffectRemoveFn(spell_rog_tricks_of_the_trade_aura::OnRemove, EFFECT_1, SPELL_AURA_DUMMY, AURA_EFFECT_HANDLE_REAL);
+        OnEffectProc += AuraEffectProcFn(spell_rog_tricks_of_the_trade_aura::HandleProc, EFFECT_1, SPELL_AURA_DUMMY);
     }
 
-private:
-    Unit* _redirectTarget;
+    ObjectGuid _redirectTarget;
+public:
+    void SetRedirectTarget(ObjectGuid const& guid) { _redirectTarget = guid; }
+};
+
+// 57934 - Tricks of the Trade (SpellScript)
+class spell_rog_tricks_of_the_trade : public SpellScript
+{
+    PrepareSpellScript(spell_rog_tricks_of_the_trade);
+
+    void DoAfterHit()
+    {
+        if (Aura* aura = GetHitAura())
+            if (auto* script = aura->GetScript<spell_rog_tricks_of_the_trade_aura>("spell_rog_tricks_of_the_trade"))
+            {
+                if (Unit* explTarget = GetExplTargetUnit())
+                    script->SetRedirectTarget(explTarget->GetGUID());
+                else
+                    script->SetRedirectTarget(ObjectGuid::Empty);
+            }
+    }
+
+    void Register() override
+    {
+        AfterHit += SpellHitFn(spell_rog_tricks_of_the_trade::DoAfterHit);
+    }
 };
 
 // 59628 - Tricks of the Trade (Proc)
@@ -672,7 +688,7 @@ class spell_rog_tricks_of_the_trade_proc : public AuraScript
 
     void HandleRemove(AuraEffect const* /*aurEff*/, AuraEffectHandleModes /*mode*/)
     {
-        GetTarget()->ResetRedirectThreat();
+        GetTarget()->GetThreatMgr().UnregisterRedirectThreat(SPELL_ROGUE_TRICKS_OF_THE_TRADE);
     }
 
     void Register() override
@@ -720,13 +736,13 @@ class spell_rog_vanish_purge : public SpellScript
     void HandleRootRemove(SpellEffIndex /*effIndex*/)
     {
         if (GetCaster() && !GetCaster()->HasAura(SPELL_PARALYZE)) // Root from Tainted Core SSC, should not be removed by vanish.
-            GetCaster()->RemoveAurasWithMechanic(1 << MECHANIC_ROOT);
+            GetCaster()->RemoveAurasWithMechanic(1ULL << MECHANIC_ROOT);
     }
 
     void HandleSnareRemove(SpellEffIndex /*effIndex*/)
     {
         if (GetCaster())
-            GetCaster()->RemoveAurasWithMechanic(1 << MECHANIC_SNARE);
+            GetCaster()->RemoveAurasWithMechanic(1ULL << MECHANIC_SNARE);
     }
 
     void Register() override
@@ -1095,7 +1111,10 @@ class spell_rog_cold_blood : public AuraScript
     bool _usedByMutilate = false;
 
 public:
-    bool WasUsedByMutilate() const { return _usedByMutilate; }
+    bool WasUsedByMutilate() const
+    {
+        return _usedByMutilate;
+    }
 
     bool CheckProc(ProcEventInfo& eventInfo)
     {
@@ -1120,6 +1139,42 @@ public:
     }
 };
 
+// 14143, 14149 - Remorseless Attacks
+class spell_rog_remorseless_attacks : public AuraScript
+{
+    PrepareAuraScript(spell_rog_remorseless_attacks);
+
+    bool _usedByMutilate = false;
+
+public:
+    bool WasUsedByMutilate() const
+    {
+        return _usedByMutilate;
+    }
+
+    bool CheckProc(ProcEventInfo& eventInfo)
+    {
+        SpellInfo const* spellInfo = eventInfo.GetSpellInfo();
+        if (!spellInfo)
+            return true;
+
+        // Block Mutilate MH (0x2) and OH (0x4) from consuming the charge immediately
+        if (spellInfo->SpellFamilyName == SPELLFAMILY_ROGUE
+            && (spellInfo->SpellFamilyFlags[1] & 0x6))
+        {
+            _usedByMutilate = true;
+            return false;
+        }
+
+        return true;
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(spell_rog_remorseless_attacks::CheckProc);
+    }
+};
+
 // 1329 - Mutilate (parent spell, all ranks)
 class spell_rog_mutilate : public SpellScript
 {
@@ -1131,16 +1186,21 @@ class spell_rog_mutilate : public SpellScript
         if (!caster)
             return;
 
-        Aura* cb = caster->GetAura(SPELL_ROGUE_COLD_BLOOD);
-        if (!cb)
-            return;
+        if (Aura* cb = caster->GetAura(SPELL_ROGUE_COLD_BLOOD))
+        {
+            auto* script = dynamic_cast<spell_rog_cold_blood*>(
+                cb->GetScriptByName("spell_rog_cold_blood"));
+            if (script && script->WasUsedByMutilate())
+                cb->Remove();
+        }
 
-        auto* script = dynamic_cast<spell_rog_cold_blood*>(
-            cb->GetScriptByName("spell_rog_cold_blood"));
-        if (!script || !script->WasUsedByMutilate())
-            return;
-
-        cb->Remove();
+        if (Aura* remorseless = caster->GetAuraOfRankedSpell(SPELL_ROGUE_REMORSELESS_ATTACKS_R1))
+        {
+            auto* script = dynamic_cast<spell_rog_remorseless_attacks*>(
+                remorseless->GetScriptByName("spell_rog_remorseless_attacks"));
+            if (script && script->WasUsedByMutilate())
+                remorseless->Remove();
+        }
     }
 
     void Register() override
@@ -1162,7 +1222,7 @@ void AddSC_rogue_spell_scripts()
     RegisterSpellScript(spell_rog_prey_on_the_weak);
     RegisterSpellScript(spell_rog_rupture);
     RegisterSpellScript(spell_rog_shiv);
-    RegisterSpellScript(spell_rog_tricks_of_the_trade);
+    RegisterSpellAndAuraScriptPair(spell_rog_tricks_of_the_trade, spell_rog_tricks_of_the_trade_aura);
     RegisterSpellScript(spell_rog_tricks_of_the_trade_proc);
     RegisterSpellScript(spell_rog_pickpocket);
     RegisterSpellScript(spell_rog_vanish_purge);
@@ -1182,4 +1242,5 @@ void AddSC_rogue_spell_scripts()
     RegisterSpellScript(spell_rog_focused_attacks);
     RegisterSpellScript(spell_rog_mutilate);
     RegisterSpellScript(spell_rog_cold_blood);
+    RegisterSpellScript(spell_rog_remorseless_attacks);
 }

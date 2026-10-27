@@ -28,6 +28,7 @@
 #include "Log.h"
 #include "MoveSpline.h"
 #include "MoveSplineInit.h"
+#include "Player.h"
 #include "PointMovementGenerator.h"
 #include "RandomMovementGenerator.h"
 #include "TargetedMovementGenerator.h"
@@ -538,9 +539,9 @@ void MotionMaster::MovePath(uint32 path_id, ForcedMovement forcedMovement, PathS
     }
 
     Movement::PointsArray points;
-    for (auto& point : *path)
+    for (auto const& node : path->Nodes)
     {
-        points.push_back(G3D::Vector3(point.second.x, point.second.y, point.second.z));
+        points.push_back(G3D::Vector3(node.X, node.Y, node.Z));
     }
 
     // pass the new PointsArray* to the appropriate MoveSplinePath function
@@ -616,10 +617,11 @@ void MotionMaster::MoveTakeoff(uint32 id, float x, float y, float z, float speed
     MoveTakeoff(id, pos, speed, skipAnimation);
 }
 
-void MotionMaster::MoveKnockbackFrom(float srcX, float srcY, float speedXY, float speedZ)
+void MotionMaster::MoveKnockbackFrom(float srcX, float srcY, float speedXY, float speedZ,
+    bool allowClientControlled /*= false*/)
 {
     //this function may make players fall below map
-    if (_owner->IsPlayer())
+    if (!allowClientControlled && _owner->IsPlayer() && _owner->IsClientControlled())
         return;
 
     if (speedXY <= 0.1f)
@@ -638,6 +640,15 @@ void MotionMaster::MoveKnockbackFrom(float srcX, float srcY, float speedXY, floa
     init.SetParabolic(max_height, 0);
     init.SetOrientationFixed(true);
     init.SetVelocity(speedXY);
+
+    // Do not mutate an active fleeing/confused movement generator,
+    // doing so breaks the movement upon landing from the knockback
+    MovementGeneratorType slotType = GetMotionSlotType(MOTION_SLOT_CONTROLLED);
+    if (slotType == FLEEING_MOTION_TYPE || slotType == CONFUSED_MOTION_TYPE)
+    {
+        init.Launch();
+        return;
+    }
 
     Mutate(new EffectMovementGenerator(init, 0), MOTION_SLOT_CONTROLLED);
 }
@@ -680,6 +691,89 @@ void MotionMaster::MoveJump(float x, float y, float z, float speedXY, float spee
         init.SetFacing(target);
 
     Mutate(new EffectMovementGenerator(init, id), MOTION_SLOT_CONTROLLED);
+}
+
+/**
+ * @brief Makes the unit travel a closed, cyclic path around (x, y, z).
+ *
+ * The path starts at the unit's bearing from the centre. Flight state decides whether z pins to
+ * the argument or follows the terrain, raised by the unit's hover height, and which speed is
+ * used; forcedMovement overrides the walk/run choice, and FORCED_MOVEMENT_FLY flies a unit that
+ * is not fly-flagged.
+ *
+ * @param stepCount Number of points the path is built from, must be at least 2: a lower count
+ *                  yields an empty or single-point path, which Launch() refuses, leaving the unit
+ *                  idle with neither spline nor movement generator.
+ * @param speed     Fixed velocity; 0.0f keeps the speed the movement flags select.
+ */
+void MotionMaster::MoveCirclePath(float x, float y, float z, float radius, bool clockwise, uint8 stepCount,
+    ForcedMovement forcedMovement, float speed)
+{
+    if (stepCount < 2)
+    {
+        LOG_ERROR("movement.motionmaster", "MotionMaster::MoveCirclePath: stepCount {} for unit ({}), no path launched",
+            stepCount, _owner->GetGUID().ToString());
+        return;
+    }
+
+    // FORCED_MOVEMENT_FLY flies units that are not fly-flagged, so z and the spline flags have to
+    // key off the same value.
+    bool const flying = _owner->IsFlying() || forcedMovement == FORCED_MOVEMENT_FLY;
+
+    float step = 2 * float(M_PI) / stepCount * (clockwise ? -1.0f : 1.0f);
+    Position const pos = { x, y, z, 0.0f };
+    float angle = pos.GetAngle(_owner->GetPositionX(), _owner->GetPositionY());
+
+    Movement::MoveSplineInit init(_owner);
+
+    for (uint8 i = 0; i < stepCount; angle += step, ++i)
+    {
+        G3D::Vector3 point;
+        point.x = x + radius * cosf(angle);
+        point.y = y + radius * sinf(angle);
+
+        if (flying)
+            point.z = z;
+        else
+        {
+            point.z = _owner->GetMapHeight(point.x, point.y, z);
+
+            if (point.z <= INVALID_HEIGHT)
+            {
+                LOG_ERROR("movement.motionmaster",
+                    "MotionMaster::MoveCirclePath: no ground below ({}, {}) for unit ({}), no path launched",
+                    point.x, point.y, _owner->GetGUID().ToString());
+                return;
+            }
+
+            point.z += _owner->GetHoverHeight();
+        }
+
+        init.Path().push_back(point);
+    }
+
+    if (flying)
+    {
+        init.SetFly();
+        init.SetCyclic();
+        init.SetAnimation(AnimTier::Fly);
+    }
+    else
+    {
+        init.SetWalk(true);
+        init.SetSmooth();
+        init.SetCyclic();
+    }
+
+    if (forcedMovement == FORCED_MOVEMENT_WALK)
+        init.SetWalk(true);
+    else if (forcedMovement == FORCED_MOVEMENT_RUN)
+        init.SetWalk(false);
+
+    if (speed > 0.0f)
+        init.SetVelocity(speed);
+
+    init.Launch();
 }
 
 /**
@@ -728,7 +822,7 @@ void MotionMaster::MoveFall(uint32 id /*=0*/, bool addFlagForNPC)
 /**
  * @brief The unit will charge the target. Doesn't work with UNIT_FLAG_DISABLE_MOVE
  */
-void MotionMaster::MoveCharge(float x, float y, float z, float speed, uint32 id, const Movement::PointsArray* path, bool generatePath, float orientation /* = 0.0f*/, ObjectGuid targetGUID /*= ObjectGuid::Empty*/)
+void MotionMaster::MoveCharge(float x, float y, float z, float speed, uint32 id, Movement::PointsArray const* path, bool generatePath, float orientation /* = 0.0f*/, ObjectGuid targetGUID /*= ObjectGuid::Empty*/)
 {
     if (_owner->HasUnitFlag(UNIT_FLAG_DISABLE_MOVE))
         return;
@@ -837,7 +931,17 @@ void MotionMaster::MoveTaxiFlight(uint32 path, uint32 pathnode)
         {
             LOG_DEBUG("movement.motionmaster", "{} taxi to (Path {} node {})", _owner->GetName(), path, pathnode);
             FlightPathMovementGenerator* mgen = new FlightPathMovementGenerator(pathnode);
-            mgen->LoadPath(_owner->ToPlayer());
+            Player* player = _owner->ToPlayer();
+            if (!mgen->LoadPath(player))
+            {
+                LOG_ERROR("movement.motionmaster", "{} failed to build taxi path (Path {} node {}), clearing taxi destinations",
+                    _owner->GetName(), path, pathnode);
+                player->m_taxi.ClearTaxiDestinations();
+                player->Dismount();
+                delete mgen;
+                return;
+            }
+
             Mutate(mgen, MOTION_SLOT_CONTROLLED);
         }
         else
@@ -879,10 +983,10 @@ void MotionMaster::MoveDistract(uint32 timer)
 
 void MotionMaster::Mutate(MovementGenerator* m, MovementSlot slot)
 {
+    bool const delayed = (_cleanFlag & MMCF_UPDATE);
+
     while (MovementGenerator* curr = Impl[slot])
     {
-        bool delayed = (_top == slot && (_cleanFlag & MMCF_UPDATE));
-
         // clear slot AND decrease top immediately to avoid crashes when referencing null top in DirectDelete
         Impl[slot] = nullptr;
         while (!empty() && !top())
@@ -918,7 +1022,7 @@ void MotionMaster::MoveWaypoint(uint32 path_id, bool repeatable, PathSource path
     if (_owner->HasUnitFlag(UNIT_FLAG_DISABLE_MOVE))
         return;
 
-    Mutate(new WaypointMovementGenerator<Creature>(path_id, pathSource, repeatable), MOTION_SLOT_IDLE);
+    Mutate(new WaypointMovementGenerator<Creature>(path_id, repeatable, pathSource), MOTION_SLOT_IDLE);
 
     LOG_DEBUG("movement.motionmaster", "{} ({}) start moving over path(Id:{}, repeatable: {})",
         _owner->IsPlayer() ? "Player" : "Creature", _owner->GetGUID().ToString(), path_id, repeatable ? "YES" : "NO");
@@ -935,47 +1039,28 @@ void MotionMaster::MoveRotate(uint32 time, RotateDirection direction)
     Mutate(new RotateMovementGenerator(time, direction), MOTION_SLOT_ACTIVE);
 }
 
-#ifdef MOD_PLAYERBOTS
-void MotionMaster::MoveKnockbackFromForPlayer(float srcX, float srcY, float speedXY, float speedZ)
-{
-    if (speedXY <= 0.1f)
-        return;
-
-    Position dest = _owner->GetPosition();
-    float moveTimeHalf = speedZ / Movement::gravity;
-    float dist = 2 * moveTimeHalf * speedXY;
-    float max_height = -Movement::computeFallElevation(moveTimeHalf, false, -speedZ);
-
-    // Use a mmap raycast to get a valid destination.
-    _owner->MovePositionToFirstCollision(dest, dist, _owner->GetRelativeAngle(srcX, srcY) + float(M_PI));
-
-    Movement::MoveSplineInit init(_owner);
-    init.MoveTo(dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ());
-    init.SetParabolic(max_height, 0);
-    init.SetOrientationFixed(true);
-    init.SetVelocity(speedXY);
-    Mutate(new EffectMovementGenerator(init, 0), MOTION_SLOT_CONTROLLED);
-}
-
-// Similar to MovePoint except setting orientationInversed
-void MotionMaster::MovePointBackwards(uint32 id, float x, float y, float z, bool generatePath, bool forceDestination, MovementSlot slot, float orientation /* = 0.0f*/)
+// Same as MovePoint, but the unit keeps facing away from the destination (walks backwards)
+void MotionMaster::MovePointBackwards(uint32 id, float x, float y, float z, bool generatePath, bool forceDestination,
+    MovementSlot slot, float orientation /* = 0.0f*/)
 {
     if (_owner->HasUnitFlag(UNIT_FLAG_DISABLE_MOVE))
         return;
 
     if (_owner->IsPlayer())
     {
-        LOG_DEBUG("movement.motionmaster", "Player ({}) targeted point (Id: {} X: {} Y: {} Z: {})", _owner->GetGUID().ToString(), id, x, y, z);
-        Mutate(new PointMovementGenerator<Player>(id, x, y, z, FORCED_MOVEMENT_NONE, 0.0f, orientation, nullptr, generatePath, forceDestination, std::nullopt, ObjectGuid::Empty, true), slot);
+        LOG_DEBUG("movement.motionmaster", "Player ({}) targeted point backwards (Id: {} X: {} Y: {} Z: {})",
+            _owner->GetGUID().ToString(), id, x, y, z);
+        Mutate(new PointMovementGenerator<Player>(id, x, y, z, FORCED_MOVEMENT_NONE, 0.0f, orientation, nullptr,
+            generatePath, forceDestination, std::nullopt, ObjectGuid::Empty, true), slot);
     }
     else
     {
-        LOG_DEBUG("movement.motionmaster", "Creature ({}) targeted point (ID: {} X: {} Y: {} Z: {})", _owner->GetGUID().ToString(), id, x, y, z);
-        Mutate(new PointMovementGenerator<Creature>(id, x, y, z, FORCED_MOVEMENT_NONE, 0.0f, orientation, nullptr, generatePath, forceDestination, std::nullopt, ObjectGuid::Empty, true), slot);
+        LOG_DEBUG("movement.motionmaster", "Creature ({}) targeted point backwards (ID: {} X: {} Y: {} Z: {})",
+            _owner->GetGUID().ToString(), id, x, y, z);
+        Mutate(new PointMovementGenerator<Creature>(id, x, y, z, FORCED_MOVEMENT_NONE, 0.0f, orientation, nullptr,
+            generatePath, forceDestination, std::nullopt, ObjectGuid::Empty, true), slot);
     }
 }
-
-#endif
 
 void MotionMaster::propagateSpeedChange()
 {

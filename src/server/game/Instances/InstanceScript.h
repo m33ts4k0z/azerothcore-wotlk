@@ -193,10 +193,20 @@ public:
     //Called when a player enters/leaves water bodies.
     virtual void OnPlayerInWaterStateUpdate(Player* /*player*/, bool /*inWater*/) {}
 
-    //Handle open / close objects
-    //use HandleGameObject(ObjectGuid::Empty, boolen, GO); in OnObjectCreate in instance scripts
-    //use HandleGameObject(GUID, boolen, nullptr); in any other script
+    /**
+     * @brief Open or close a GameObject by GUID.
+     * @param guid The GUID of the GameObject. Pass ObjectGuid::Empty when providing the go pointer directly.
+     * @param open true to open (GO_STATE_ACTIVE), false to close (GO_STATE_READY).
+     * @param go Optional pointer to the GameObject. If nullptr, the object is looked up by GUID.
+     */
     void HandleGameObject(ObjectGuid guid, bool open, GameObject* go = nullptr);
+
+    /**
+     * @brief Open or close a GameObject registered via LoadObjectData.
+     * @param type The ObjectData type constant (e.g. GO_FRONT_DOOR) used in the gameObjectData array.
+     * @param open true to open (GO_STATE_ACTIVE), false to close (GO_STATE_READY).
+     */
+    void HandleGameObject(uint32 type, bool open);
 
     //change active state of doors or buttons
     void DoUseDoorOrButton(ObjectGuid guid, uint32 withRestoreTime = 0, bool useAlternativeState = false);
@@ -240,6 +250,9 @@ public:
 
     virtual bool SetBossState(uint32 id, EncounterState state);
     EncounterState GetBossState(uint32 id) const { return id < bosses.size() ? bosses[id].state : TO_BE_DECIDED; }
+    // Spawns a BossAI bound to an encounter; the respawn system keeps them down while it is DONE
+    void RegisterBossSpawn(ObjectGuid::LowType spawnId, uint32 bossId) { _bossSpawns[spawnId] = bossId; }
+    bool IsBossSpawnDone(ObjectGuid::LowType spawnId) const;
     static std::string GetBossStateName(uint8 state);
     CreatureBoundary const* GetBossBoundary(uint32 id) const { return id < bosses.size() ? &bosses[id].boundary : nullptr; }
     BossInfo const* GetBossInfo(uint32 id) const { return &bosses[id]; }
@@ -253,6 +266,8 @@ public:
 
     // Checks boss requirements (one boss required to kill other)
     virtual bool CheckRequiredBosses(uint32 /*bossId*/, Player const* /*player*/ = nullptr) const { return true; }
+
+    bool _SkipCheckRequiredBosses(Player const* player = nullptr) const;
 
     void SetCompletedEncountersMask(uint32 newMask, bool save);
 
@@ -339,6 +354,7 @@ private:
     DoorInfoMap doors;
     MinionInfoMap minions;
     ObjectInfoMap _creatureInfo;
+    std::unordered_map<ObjectGuid::LowType, uint32 /*bossId*/> _bossSpawns;
     ObjectInfoMap _gameObjectInfo;
     ObjectInfoMap _summonInfo;
     ObjectGuidMap _objectGuids;

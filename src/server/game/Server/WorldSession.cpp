@@ -19,6 +19,7 @@
     \ingroup u2w
 */
 
+#include "TC9Sidecar.h"
 #include "WorldSession.h"
 #include "AccountMgr.h"
 #include "BattlegroundMgr.h"
@@ -34,6 +35,7 @@
 #include "Log.h"
 #include "MapMgr.h"
 #include "Metric.h"
+#include "MiscPackets.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Opcodes.h"
@@ -41,6 +43,7 @@
 #include "PacketUtilities.h"
 #include "Pet.h"
 #include "Player.h"
+#include "Realm.h"
 #include "QueryHolder.h"
 #include "ScriptMgr.h"
 #include "SocialMgr.h"
@@ -105,7 +108,7 @@ bool WorldSessionFilter::Process(WorldPacket* packet)
 
 /// WorldSession constructor
 WorldSession::WorldSession(uint32 id, std::string&& name, uint32 accountFlags, std::shared_ptr<WorldSocket> sock, AccountTypes sec, uint8 expansion,
-    time_t mute_time, LocaleConstant locale, uint32 recruiter, bool isARecruiter, bool skipQueue, uint32 TotalTime, bool isBot) :
+    time_t mute_time, LocaleConstant locale, uint32 recruiter, bool isARecruiter, bool skipQueue, uint32 TotalTime) :
     m_muteTime(mute_time),
     m_timeOutTime(0),
     AntiDOS(this),
@@ -115,10 +118,14 @@ WorldSession::WorldSession(uint32 id, std::string&& name, uint32 accountFlags, s
     _security(sec),
     _skipQueue(skipQueue),
     _accountId(id),
+    _RBACData(nullptr),
     _accountName(std::move(name)),
     _accountFlags(accountFlags),
     m_expansion(expansion),
     m_total_time(TotalTime),
+    _lastUpdateTime(GameTime::GetGameTime()),
+    _createTime(GameTime::GetGameTime()),
+    _previousPlayTime(0),
     _logoutTime(0),
     m_inQueue(false),
     m_playerLoading(false),
@@ -138,7 +145,7 @@ WorldSession::WorldSession(uint32 id, std::string&& name, uint32 accountFlags, s
     _timeSyncClockDelta(0),
     _pendingTimeSyncRequests(),
     _orderCounter(0),
-    _isBot(isBot)
+    _headless(!sock)
 {
     memset(m_Tutorials, 0, sizeof(m_Tutorials));
 
@@ -154,16 +161,15 @@ WorldSession::WorldSession(uint32 id, std::string&& name, uint32 accountFlags, s
         ResetTimeOutTime(false);
         LoginDatabase.Execute("UPDATE account SET online = 1 WHERE id = {};", GetAccountId()); // One-time query
     }
-    else if (isBot)
-    {
-        m_Address = "bot";
-    }
+    else
+        m_Address = "headless";
 }
 
 /// WorldSession destructor
 WorldSession::~WorldSession()
 {
-    LoginDatabase.Execute("UPDATE account SET totaltime = {} WHERE id = {}", GetTotalTime(), GetAccountId());
+    if (!_headless)
+        LoginDatabase.Execute("UPDATE account SET totaltime = {} WHERE id = {}", GetTotalTime(), GetAccountId());
 
     ///- unload player if not unloaded
     if (_player)
@@ -176,12 +182,15 @@ WorldSession::~WorldSession()
         m_Socket = nullptr;
     }
 
+    delete _RBACData;
+
     ///- empty incoming packet queue
     WorldPacket* packet = nullptr;
     while (_recvQueue.next(packet))
         delete packet;
 
-    LoginDatabase.Execute("UPDATE account SET online = 0 WHERE id = {};", GetAccountId());     // One-time query
+    if (!_headless)
+        LoginDatabase.Execute("UPDATE account SET online = 0 WHERE id = {};", GetAccountId());     // One-time query
 }
 
 void WorldSession::UpdateAccountFlag(uint32 flag, bool remove /*= flase*/)
@@ -228,6 +237,14 @@ bool WorldSession::IsRecurringBillingAccount() const
     return HasAccountFlag(ACCOUNT_FLAG_RECURRING_BILLING);
 }
 
+bool WorldSession::IsAffectedByCAIS() const
+{
+    // China realm system for restricting consecutive play time (anti-addiction).
+    // There is no known per-account flag for it, so a realm-wide config gate is used;
+    // swap this out if a per-account/realm-region source is found later.
+    return sWorld->getBoolConfig(CONFIG_CAIS_ENABLED);
+}
+
 uint8 WorldSession::GetBillingPlanFlags() const
 {
     uint8 flags = SESSION_NONE;
@@ -240,6 +257,9 @@ uint8 WorldSession::GetBillingPlanFlags() const
 
     if (IsInternetGameRoomAccount())
         flags |= SESSION_IGR;
+
+    if (IsAffectedByCAIS())
+        flags |= SESSION_ENABLE_CAIS;
 
     return flags;
 }
@@ -287,13 +307,7 @@ ObjectGuid::LowType WorldSession::GetGuidLow() const
 /// Send a packet to the client
 void WorldSession::SendPacket(WorldPacket const* packet)
 {
-    if (packet->GetOpcode() == NULL_OPCODE)
-    {
-        LOG_ERROR("network.opcode", "{} send NULL_OPCODE", GetPlayerInfo());
-        return;
-    }
-
-    sScriptMgr->OnPlayerbotPacketSent(GetPlayer(), packet);
+    sScriptMgr->OnPacketSent(this, *packet);
 
     if (!m_Socket)
         return;
@@ -349,7 +363,7 @@ void WorldSession::QueuePacket(WorldPacket* new_packet)
 }
 
 /// Logging helper for unexpected opcodes
-void WorldSession::LogUnexpectedOpcode(WorldPacket* packet, char const* status, const char* reason)
+void WorldSession::LogUnexpectedOpcode(WorldPacket* packet, char const* status, char const* reason)
 {
     LOG_ERROR("network.opcode", "Received unexpected opcode {} Status: {} Reason: {} from {}",
         GetOpcodeNameForLogging(static_cast<OpcodeClient>(packet->GetOpcode())), status, reason, GetPlayerInfo());
@@ -373,7 +387,7 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
     ///- Before we process anything:
     /// If necessary, kick the player because the client didn't send anything for too long
     /// (or they've been idling in character select)
-    if (sWorld->getBoolConfig(CONFIG_CLOSE_IDLE_CONNECTIONS) && IsConnectionIdle() && m_Socket)
+    if (m_Socket && IsConnectionIdle() && !HasPermission(rbac::RBAC_PERM_IGNORE_IDLE_CONNECTION))
         m_Socket->CloseSocket();
 
     if (updater.ProcessUnsafe())
@@ -388,6 +402,12 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
     std::vector<WorldPacket*> requeuePackets;
     uint32 processedPackets = 0;
     time_t currentTime = GameTime::GetGameTime().count();
+
+    if (GetPlayer() && GetPlayer()->IsInWorld() && IsAffectedByCAIS())
+    {
+        CheckPlayedTimeLimit(Seconds(currentTime));
+        _lastUpdateTime = Seconds(currentTime);
+    }
 
     constexpr uint32 MAX_PROCESSED_PACKETS_IN_SAME_WORLDSESSION_UPDATE = 150;
 
@@ -443,9 +463,6 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
 
                         opHandle->Call(this, *packet);
                         LogUnprocessedTail(packet);
-#ifdef MOD_PLAYERBOTS
-                        sScriptMgr->OnPacketReceived(this, *packet);
-#endif
                     }
 
                     // lag can cause STATUS_LOGGEDIN opcodes to arrive after the player started a transfer
@@ -464,9 +481,6 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
 
                         opHandle->Call(this, *packet);
                         LogUnprocessedTail(packet);
-#ifdef MOD_PLAYERBOTS
-                        sScriptMgr->OnPacketReceived(this, *packet);
-#endif
                     }
                     break;
                 case STATUS_TRANSFER:
@@ -477,9 +491,6 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
 
                         opHandle->Call(this, *packet);
                         LogUnprocessedTail(packet);
-#ifdef MOD_PLAYERBOTS
-                        sScriptMgr->OnPacketReceived(this, *packet);
-#endif
                     }
                     break;
                 case STATUS_AUTHED:
@@ -496,9 +507,6 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
 
                     opHandle->Call(this, *packet);
                     LogUnprocessedTail(packet);
-#ifdef MOD_PLAYERBOTS
-                    sScriptMgr->OnPacketReceived(this, *packet);
-#endif
                     break;
                 case STATUS_NEVER:
                     LOG_ERROR("network.opcode", "Received not allowed opcode {} from {}",
@@ -587,7 +595,7 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
     //logout procedure should happen only in World::UpdateSessions() method!!!
     if (updater.ProcessUnsafe())
     {
-        sScriptMgr->OnPlayerbotUpdateSessions(GetPlayer());
+        sScriptMgr->OnSessionUpdate(this, diff);
 
         if (m_Socket && m_Socket->IsOpen() && _warden)
         {
@@ -633,8 +641,49 @@ bool WorldSession::IsSocketClosed() const
     return !m_Socket || !m_Socket->IsOpen();
 }
 
+void WorldSession::CheckPlayedTimeLimit(Seconds now)
+{
+    Seconds const previousPlayed = GetConsecutivePlayTime(_lastUpdateTime);
+    Seconds const currentPlayed = GetConsecutivePlayTime(now);
+
+    if ((previousPlayed < PLAY_TIME_LIMIT_FULL) &&
+        (currentPlayed >= PLAY_TIME_LIMIT_FULL))
+    {
+        SendPlayTimeWarning(PTF_UNHEALTHY_TIME, 0);
+        GetPlayer()->SetPlayerFlag(PLAYER_FLAGS_NO_PLAY_TIME);
+        GetPlayer()->RemovePlayerFlag(PLAYER_FLAGS_PARTIAL_PLAY_TIME);
+    }
+    else if ((previousPlayed < PLAY_TIME_LIMIT_APPROACHING_FULL) &&
+        (currentPlayed >= PLAY_TIME_LIMIT_APPROACHING_FULL))
+    {
+        SendPlayTimeWarning(PTF_APPROACHING_NO_PLAY_TIME, int32((PLAY_TIME_LIMIT_FULL - currentPlayed).count()));
+        GetPlayer()->SetPlayerFlag(PLAYER_FLAGS_PARTIAL_PLAY_TIME);
+        GetPlayer()->RemovePlayerFlag(PLAYER_FLAGS_NO_PLAY_TIME);
+    }
+    else if ((previousPlayed < PLAY_TIME_LIMIT_PARTIAL) &&
+        (currentPlayed >= PLAY_TIME_LIMIT_PARTIAL))
+    {
+        SendPlayTimeWarning(PTF_APPROACHING_NO_PLAY_TIME, int32((PLAY_TIME_LIMIT_FULL - currentPlayed).count()));
+        GetPlayer()->SetPlayerFlag(PLAYER_FLAGS_PARTIAL_PLAY_TIME);
+        GetPlayer()->RemovePlayerFlag(PLAYER_FLAGS_NO_PLAY_TIME);
+    }
+    else if ((previousPlayed < PLAY_TIME_LIMIT_APPROACHING_PARTIAL) &&
+        (currentPlayed >= PLAY_TIME_LIMIT_APPROACHING_PARTIAL))
+    {
+        SendPlayTimeWarning(PTF_APPROACHING_PARTIAL_PLAY_TIME, int32((PLAY_TIME_LIMIT_PARTIAL - currentPlayed).count()));
+    }
+}
+
+void WorldSession::SendPlayTimeWarning(PlayTimeFlag flag, int32 playTimeRemaining)
+{
+    WorldPackets::Misc::PlayTimeWarning playTimeWarning;
+    playTimeWarning.Flag = flag;
+    playTimeWarning.PlayTimeRemaining = playTimeRemaining;
+    SendPacket(playTimeWarning.Write());
+}
+
 /// %Log the player out
-void WorldSession::LogoutPlayer(bool save)
+void WorldSession::LogoutPlayer(bool save, bool redirecting)
 {
     // finish pending transfers before starting the logout
     while (_player && _player->IsBeingTeleportedFar())
@@ -651,13 +700,11 @@ void WorldSession::LogoutPlayer(bool save)
         if (ObjectGuid lguid = _player->GetLootGUID())
             DoLootRelease(lguid);
 
-        sScriptMgr->OnPlayerbotLogout(_player);
-
         ///- If the player just died before logging out, make him appear as a ghost
         //FIXME: logout must be delayed in case lost connection with client in time of combat
         if (_player->GetDeathTimer())
         {
-            _player->getHostileRefMgr().deleteReferences(true);
+            _player->GetThreatMgr().RemoveMeFromThreatLists();
             _player->BuildPlayerRepop();
             _player->RepopAtGraveyard();
         }
@@ -722,19 +769,26 @@ void WorldSession::LogoutPlayer(bool save)
         // there are some positive auras from boss encounters that can be kept by logging out and logging in after boss is dead, and may be used on next bosses
         _player->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_CHANGE_MAP);
 
-        if (Group *group = _player->GetGroupInvite())
-            sWorld->getBoolConfig(CONFIG_LEAVE_GROUP_ON_LOGOUT)
-                ? _player->UninviteFromGroup()  // Can disband group.
-                : group->RemoveInvite(_player); // Just removes invite.
+        if (!redirecting)
+        {
+            if (Group *group = _player->GetGroupInvite())
+                sWorld->getBoolConfig(CONFIG_LEAVE_GROUP_ON_LOGOUT)
+                    ? _player->UninviteFromGroup()  // Can disband group.
+                    : group->RemoveInvite(_player); // Just removes invite.
 
-        // remove player from the group if he is:
-        // a) in group; b) not in raid group; c) logging out normally (not being kicked or disconnected) d) LeaveGroupOnLogout is enabled
-        if (_player->GetGroup() && !_player->GetGroup()->isRaidGroup() && !_player->GetGroup()->isLFGGroup() && m_Socket && sWorld->getBoolConfig(CONFIG_LEAVE_GROUP_ON_LOGOUT))
-            _player->RemoveFromGroup();
+            // remove player from the group if he is:
+            // a) in group; b) not in raid group; c) logging out normally (not being kicked or disconnected) d) LeaveGroupOnLogout is enabled
+            if (!sToCloud9Sidecar->ClusterModeEnabled() && _player->GetGroup() && !_player->GetGroup()->isRaidGroup() && !_player->GetGroup()->isLFGGroup() && m_Socket && sWorld->getBoolConfig(CONFIG_LEAVE_GROUP_ON_LOGOUT))
+                _player->RemoveFromGroup();
+            // Remove player from active loot rolls in LFG groups (player stays in group but should not block rolls)
+            else if (Group* group = _player->GetGroup())
+                if (group->isLFGGroup())
+                    group->RemovePlayerFromRolls(_player->GetGUID());
 
-        // pussywizard: checked second time after being removed from a group
-        if (!_player->IsBeingTeleportedFar() && !_player->m_InstanceValid && !_player->IsGameMaster())
-            _player->RepopAtGraveyard();
+            // pussywizard: checked second time after being removed from a group
+            if (!_player->IsBeingTeleportedFar() && !_player->m_InstanceValid && !_player->IsGameMaster())
+                _player->RepopAtGraveyard();
+        }
 
         // Repop at Graveyard or other player far teleport will prevent saving player because of not present map
         // Teleport player immediately for correct player save
@@ -773,21 +827,22 @@ void WorldSession::LogoutPlayer(bool save)
             }
         }
 
-        //! Broadcast a logout message to the player's friends
-        sSocialMgr->SendFriendStatus(_player, FRIEND_OFFLINE, _player->GetGUID(), true);
-        sSocialMgr->RemovePlayerSocial(_player->GetGUID());
+        if (!redirecting)
+        {
+            //! Broadcast a logout message to the player's friends
+            sSocialMgr->SendFriendStatus(_player, FRIEND_OFFLINE, _player->GetGUID(), true);
+            sSocialMgr->RemovePlayerSocial(_player->GetGUID());
 
-        //! Call script hook before deletion
-        sScriptMgr->OnPlayerLogout(_player);
+            //! Call script hook before deletion
+            sScriptMgr->OnPlayerLogout(_player);
+        }
 
         METRIC_EVENT("player_events", "Logout", _player->GetName());
 
         LOG_INFO("entities.player", "Account: {} (IP: {}) Logout Character:[{}] ({}) Level: {}",
             GetAccountId(), GetRemoteAddress(), _player->GetName(), _player->GetGUID().ToString(), _player->GetLevel());
 
-        uint32 statementIndex = CHAR_UPD_ACCOUNT_ONLINE;
-        uint32 statementParam = GetAccountId();
-        sScriptMgr->OnDatabaseSelectIndexLogout(_player, statementIndex, statementParam);
+        ObjectGuid const playerGuid = _player->GetGUID();
 
         //! Remove the player from the world
         // the player may not be in the world when logging out
@@ -807,10 +862,13 @@ void WorldSession::LogoutPlayer(bool save)
         SendPacket(WorldPackets::Character::LogoutComplete().Write());
         LOG_DEBUG("network", "SESSION: Sent SMSG_LOGOUT_COMPLETE Message");
 
-        //! Since each account can only have one online character at any given time, ensure all characters for active account are marked as offline
-        CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CharacterDatabaseStatements(statementIndex));
-        stmt->SetData(0, statementParam);
-        CharacterDatabase.Execute(stmt);
+        //! Mark all characters of the account offline, unless a script running several per account handles it instead
+        if (!redirecting && sScriptMgr->OnPlayerCanMarkAccountOffline(playerGuid, GetAccountId()))
+        {
+            CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_UPD_ACCOUNT_ONLINE);
+            stmt->SetData(0, GetAccountId());
+            CharacterDatabase.Execute(stmt);
+        }
     }
 
     m_playerLogout = false;
@@ -1526,21 +1584,69 @@ void WorldSession::InitializeSessionCallback(CharacterDatabaseQueryHolder const&
     LoadAccountData(realmHolder.GetPreparedResult(AccountInfoQueryHolderPerRealm::GLOBAL_ACCOUNT_DATA), GLOBAL_CACHE_MASK);
     LoadTutorialsData(realmHolder.GetPreparedResult(AccountInfoQueryHolderPerRealm::TUTORIALS));
 
-    if (!m_inQueue)
+    if (!sToCloud9Sidecar->ClusterModeEnabled())
     {
-        SendAuthResponse(AUTH_OK, true);
-    }
-    else
-    {
-        SendAuthWaitQueue(0);
+        if (!m_inQueue)
+        {
+            SendAuthResponse(AUTH_OK, true);
+        }
+        else
+        {
+            SendAuthWaitQueue(0);
+        }
     }
 
     SetInQueue(false);
     ResetTimeOutTime(false);
 
-    SendAddonsInfo();
-    SendClientCacheVersion(clientCacheVersion);
-    SendTutorialsData();
+    if (!sToCloud9Sidecar->ClusterModeEnabled())
+    {
+        SendAddonsInfo();
+        SendClientCacheVersion(clientCacheVersion);
+        SendTutorialsData();
+    }
+}
+
+void WorldSession::HandleTC9PrepareForRedirect(WorldPacket& /*recvData*/)
+{
+    if (!sToCloud9Sidecar->ClusterModeEnabled())
+        return;
+
+    Player* player = this->GetPlayer();
+    if (player == nullptr)
+    {
+        WorldPacket data(TC9_SMSG_READY_FOR_REDIRECT, 1);
+        data << uint8(1); // 1 - Failed.
+        SendPacket(&data);
+        return;
+    }
+
+    LOG_DEBUG("network", "Starting saving, AccountId = {}", GetAccountId());
+
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    player->SaveToDB(trans, false, true);
+    AddTransactionCallback(CharacterDatabase.AsyncCommitTransaction(trans)).AfterComplete([this](bool success)
+    {
+        WorldPacket data(TC9_SMSG_READY_FOR_REDIRECT, 1);
+        data << uint8(!success); // 0 - Success, 1 - Failed.
+        SendPacket(&data);
+
+        if (!success)
+        {
+            LOG_ERROR("network", "Failed to save player, AccountId = {}", GetAccountId());
+            return;
+        }
+
+        LOG_DEBUG("network", "Saved, AccountId = {}", GetAccountId());
+
+        Player* player = GetPlayer();
+        if (!player)
+            return;
+
+        player->m_Events.AddEventAtOffset([this](){
+            KickPlayer("HandlePrepareForRedirect client redirected");
+        }, 100ms);
+    });
 }
 
 void WorldSession::SetPacketLogging(bool state)
@@ -1549,7 +1655,62 @@ void WorldSession::SetPacketLogging(bool state)
         m_Socket->SetPacketLogging(state);
 }
 
-LockedQueue<WorldPacket*>& WorldSession::GetPacketQueue()
+std::unique_ptr<WorldPacket> WorldSession::NextQueuedPacket()
 {
-    return _recvQueue;
+    WorldPacket* packet = nullptr;
+    if (!_recvQueue.next(packet))
+        return nullptr;
+
+    return std::unique_ptr<WorldPacket>(packet);
+}
+
+void WorldSession::LoadPermissions()
+{
+    uint32 id = GetAccountId();
+    uint8 secLevel = GetSecurity();
+
+    LOG_DEBUG("rbac", "WorldSession::LoadPermissions [AccountId: {}, Name: {}, realmId: {}, secLevel: {}]",
+        id, _accountName, realm.Id.Realm, secLevel);
+
+    _RBACData = new rbac::RBACData(id, _accountName, realm.Id.Realm, secLevel);
+    _RBACData->LoadFromDB();
+}
+
+QueryCallback WorldSession::LoadPermissionsAsync()
+{
+    uint32 id = GetAccountId();
+    uint8 secLevel = GetSecurity();
+
+    LOG_DEBUG("rbac", "WorldSession::LoadPermissions [AccountId: {}, Name: {}, realmId: {}, secLevel: {}]",
+        id, _accountName, realm.Id.Realm, secLevel);
+
+    _RBACData = new rbac::RBACData(id, _accountName, realm.Id.Realm, secLevel);
+    return _RBACData->LoadFromDBAsync();
+}
+
+bool WorldSession::HasPermission(uint32 permission)
+{
+    if (!_RBACData)
+        LoadPermissions();
+
+    bool hasPermission = _RBACData->HasPermission(permission);
+    LOG_DEBUG("rbac", "WorldSession::HasPermission [AccountId: {}, Name: {}, realmId: {}]",
+                   _RBACData->GetId(), _RBACData->GetName(), realm.Id.Realm);
+
+    return hasPermission;
+}
+
+void WorldSession::InvalidateRBACData()
+{
+    LOG_DEBUG("rbac", "WorldSession::InvalidateRBACData [AccountId: {}, Name: {}, realmId: {}]",
+                   _RBACData->GetId(), _RBACData->GetName(), realm.Id.Realm);
+    delete _RBACData;
+    _RBACData = nullptr;
+}
+
+void WorldSession::InitRBACDataForTest()
+{
+    delete _RBACData;
+    _RBACData = new rbac::RBACData(_accountId, _accountName, realm.Id.Realm, _security);
+    _RBACData->LoadFromDBCallback(nullptr);
 }

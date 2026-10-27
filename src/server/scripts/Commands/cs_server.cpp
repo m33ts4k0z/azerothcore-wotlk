@@ -25,14 +25,18 @@
 #include "ModuleMgr.h"
 #include "MotdMgr.h"
 #include "MySQLThreading.h"
+#include "RBAC.h"
 #include "Realm.h"
+#include "ScriptMgr.h"
 #include "StringConvert.h"
+#include "Timer.h"
 #include "UpdateTime.h"
 #include "VMapFactory.h"
 #include "VMapMgr2.h"
 #include "WorldSessionMgr.h"
 #include <boost/version.hpp>
 #include <filesystem>
+#include <map>
 #include <numeric>
 #include <openssl/crypto.h>
 #include <openssl/opensslv.h>
@@ -48,44 +52,45 @@ public:
     {
         static ChatCommandTable serverIdleRestartCommandTable =
         {
-            { "cancel",       HandleServerShutDownCancelCommand, SEC_ADMINISTRATOR, Console::Yes },
-            { "",             HandleServerIdleRestartCommand,    SEC_CONSOLE,       Console::Yes }
+            { "cancel",       HandleServerShutDownCancelCommand, rbac::RBAC_PERM_COMMAND_SERVER_IDLERESTART_CANCEL, Console::Yes },
+            { "",             HandleServerIdleRestartCommand,    rbac::RBAC_PERM_COMMAND_SERVER_IDLERESTART,        Console::Yes }
         };
 
         static ChatCommandTable serverIdleShutdownCommandTable =
         {
-            { "cancel",       HandleServerShutDownCancelCommand, SEC_ADMINISTRATOR, Console::Yes },
-            { "",             HandleServerIdleShutDownCommand,   SEC_CONSOLE,       Console::Yes }
+            { "cancel",       HandleServerShutDownCancelCommand, rbac::RBAC_PERM_COMMAND_SERVER_IDLESHUTDOWN_CANCEL, Console::Yes },
+            { "",             HandleServerIdleShutDownCommand,   rbac::RBAC_PERM_COMMAND_SERVER_IDLESHUTDOWN,        Console::Yes }
         };
 
         static ChatCommandTable serverRestartCommandTable =
         {
-            { "cancel",       HandleServerShutDownCancelCommand, SEC_ADMINISTRATOR, Console::Yes },
-            { "",             HandleServerRestartCommand,        SEC_ADMINISTRATOR, Console::Yes }
+            { "cancel",       HandleServerShutDownCancelCommand, rbac::RBAC_PERM_COMMAND_SERVER_RESTART_CANCEL, Console::Yes },
+            { "",             HandleServerRestartCommand,        rbac::RBAC_PERM_COMMAND_SERVER_RESTART,        Console::Yes }
         };
 
         static ChatCommandTable serverShutdownCommandTable =
         {
-            { "cancel",       HandleServerShutDownCancelCommand, SEC_ADMINISTRATOR, Console::Yes },
-            { "",             HandleServerShutDownCommand,       SEC_ADMINISTRATOR, Console::Yes }
+            { "cancel",       HandleServerShutDownCancelCommand, rbac::RBAC_PERM_COMMAND_SERVER_SHUTDOWN_CANCEL, Console::Yes },
+            { "",             HandleServerShutDownCommand,       rbac::RBAC_PERM_COMMAND_SERVER_SHUTDOWN,        Console::Yes }
         };
 
         static ChatCommandTable serverSetCommandTable =
         {
-            { "loglevel",     HandleServerSetLogLevelCommand,    SEC_CONSOLE,       Console::Yes },
-            { "motd",         HandleServerSetMotdCommand,        SEC_ADMINISTRATOR, Console::Yes },
-            { "closed",       HandleServerSetClosedCommand,      SEC_CONSOLE,       Console::Yes },
+            { "loglevel",     HandleServerSetLogLevelCommand,    rbac::RBAC_PERM_COMMAND_SERVER_SET_LOGLEVEL, Console::Yes },
+            { "motd",         HandleServerSetMotdCommand,        rbac::RBAC_PERM_COMMAND_SERVER_SET_MOTD,     Console::Yes },
+            { "closed",       HandleServerSetClosedCommand,      rbac::RBAC_PERM_COMMAND_SERVER_SET_CLOSED,   Console::Yes },
+            { "security",     HandleServerSetSecurityCommand,    rbac::RBAC_PERM_COMMAND_SERVER_SET_SECURITY, Console::Yes },
         };
 
         static ChatCommandTable serverCommandTable =
         {
-            { "corpses",      HandleServerCorpsesCommand,        SEC_GAMEMASTER,    Console::Yes },
-            { "debug",        HandleServerDebugCommand,          SEC_ADMINISTRATOR, Console::Yes },
-            { "exit",         HandleServerExitCommand,           SEC_CONSOLE,       Console::Yes },
+            { "corpses",      HandleServerCorpsesCommand,        rbac::RBAC_PERM_COMMAND_SERVER_CORPSES,  Console::Yes },
+            { "debug",        HandleServerDebugCommand,          rbac::RBAC_PERM_COMMAND_SERVER_DEBUG,    Console::Yes },
+            { "exit",         HandleServerExitCommand,           rbac::RBAC_PERM_COMMAND_SERVER_EXIT,     Console::Yes },
             { "idlerestart",  serverIdleRestartCommandTable },
             { "idleshutdown", serverIdleShutdownCommandTable },
-            { "info",         HandleServerInfoCommand,           SEC_PLAYER,        Console::Yes },
-            { "motd",         HandleServerMotdCommand,           SEC_PLAYER,        Console::Yes },
+            { "info",         HandleServerInfoCommand,           rbac::RBAC_PERM_COMMAND_SERVER_INFO,     Console::Yes },
+            { "motd",         HandleServerMotdCommand,           rbac::RBAC_PERM_COMMAND_SERVER_MOTD,     Console::Yes },
             { "restart",      serverRestartCommandTable },
             { "shutdown",     serverShutdownCommandTable },
             { "set",          serverSetCommandTable }
@@ -213,10 +218,11 @@ public:
         handler->PSendSysMessage("Default DBC locale: {}.\nAll available DBC locales: {}", localeNames[defaultLocale], availableLocales);
 
         handler->PSendSysMessage("Using World DB: {}", sWorld->GetDBVersion());
-#ifdef MOD_PLAYERBOTS
-        handler->PSendSysMessage("Using Playerbots DB Revision: {}", sWorld->GetPlayerbotsDBRevision());
-#endif
-        
+
+        std::map<std::string, std::string> moduleDBRevisions;
+        sScriptMgr->OnDatabaseGetDBRevision(moduleDBRevisions);
+        for (auto const& [moduleName, revision] : moduleDBRevisions)
+            handler->PSendSysMessage("Using {} DB Revision: {}", moduleName, revision);
 
         std::string lldb = "No updates found!";
         if (QueryResult resL = LoginDatabase.Query("SELECT name FROM updates ORDER BY name DESC LIMIT 1"))
@@ -244,10 +250,6 @@ public:
         handler->PSendSysMessage("LoginDatabase queue size: {}", LoginDatabase.QueueSize());
         handler->PSendSysMessage("CharacterDatabase queue size: {}", CharacterDatabase.QueueSize());
         handler->PSendSysMessage("WorldDatabase queue size: {}", WorldDatabase.QueueSize());
-#ifdef MOD_PLAYERBOTS
-        handler->PSendSysMessage("PlayerbotsDatabase queue size: {}", PlayerbotsDatabase.QueueSize());
-#endif
-        
 
         if (Acore::Module::GetEnableModulesList().empty())
             handler->PSendSysMessage("No modules are enabled");
@@ -272,16 +274,17 @@ public:
 
         handler->PSendSysMessage("{}", GitRevision::GetFullVersion());
         if (!queuedSessionCount)
-            handler->PSendSysMessage("Connected players: {}. Characters in world: {}.", activeSessionCount, playerCount);
+            handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_CONNECTED, activeSessionCount, connPeak);
         else
-            handler->PSendSysMessage("Connected players: {}. Characters in world: {}. Queue: {}.", activeSessionCount, playerCount, queuedSessionCount);
+            handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_CONNECTED_QUEUE, activeSessionCount, connPeak, queuedSessionCount);
 
-        handler->PSendSysMessage("Connection peak: {}.", connPeak);
+        handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_CHARACTERS_IN_WORLD, playerCount, sWorldSessionMgr->GetMaxPlayerCount(), sWorld->GetLifetimeMaxPlayerCount());
+        handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_SECURITY, uint32(sWorld->GetPlayerSecurityLimit()));
         handler->PSendSysMessage(LANG_UPTIME, secsToTimeString(GameTime::GetUptime().count()));
-        handler->PSendSysMessage("Update time diff: {}ms. Last {} diffs summary:", sWorldUpdateTime.GetLastUpdateTime(), sWorldUpdateTime.GetDatasetSize());
-        handler->PSendSysMessage("|- Mean: {}ms", sWorldUpdateTime.GetAverageUpdateTime());
-        handler->PSendSysMessage("|- Median: {}ms", sWorldUpdateTime.GetPercentile(50));
-        handler->PSendSysMessage("|- Percentiles (95, 99, max): {}ms, {}ms, {}ms",
+        handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_UPDATE_DIFF, sWorldUpdateTime.GetLastUpdateTime(), sWorldUpdateTime.GetDatasetSize());
+        handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_UPDATE_MEAN, sWorldUpdateTime.GetAverageUpdateTime());
+        handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_UPDATE_MEDIAN, sWorldUpdateTime.GetPercentile(50));
+        handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_UPDATE_PERCENTILES,
                                  sWorldUpdateTime.GetPercentile(95),
                                  sWorldUpdateTime.GetPercentile(99),
                                  sWorldUpdateTime.GetPercentile(100));
@@ -290,14 +293,63 @@ public:
         if (sWorld->IsShuttingDown())
             handler->PSendSysMessage(LANG_SHUTDOWN_TIMELEFT, secsToTimeString(sWorld->GetShutDownTimeLeft()).append("."));
 
+        SendPreviousSessionInfo(handler);
+
         return true;
     }
+
+    static void SendPreviousSessionInfo(ChatHandler* handler)
+    {
+        Optional<PreviousSessionInfo> const& previous = sWorld->GetPreviousSessionInfo();
+        if (!previous)
+            return;
+
+        std::string uptime = secsToTimeString(previous->Uptime.count());
+
+        if (previous->Crashed)
+        {
+            std::string lastSeen = Acore::Time::TimeToTimestampStr(previous->StartTime + previous->Uptime);
+
+            // A crash with a type set happened after the world loop had already stopped
+            if (previous->Type == SHUTDOWN_TYPE_UNKNOWN)
+                handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_CRASH_RECOVERED, uptime, lastSeen);
+            else
+                handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_CRASH_DURING, handler->GetAcoreString(GetShutdownTypeString(previous->Type)), uptime, lastSeen);
+        }
+        else if (previous->Type == SHUTDOWN_TYPE_UNKNOWN)
+            handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_PREVIOUS_RAN, uptime);
+        else
+            handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_PREVIOUS_ENDED, handler->GetAcoreString(GetShutdownTypeString(previous->Type)), uptime);
+
+        if (!previous->Reason.empty())
+            handler->PSendSysMessage(LANG_COMMAND_SERVER_INFO_SHUTDOWN_REASON, previous->Reason);
+    }
+
+    static AcoreStrings GetShutdownTypeString(SessionShutdownType type)
+    {
+        switch (type)
+        {
+            case SHUTDOWN_TYPE_RESTART:
+                return LANG_COMMAND_SERVER_INFO_TYPE_RESTART;
+            case SHUTDOWN_TYPE_ERROR:
+                return LANG_COMMAND_SERVER_INFO_TYPE_ERROR;
+            default:
+                return LANG_COMMAND_SERVER_INFO_TYPE_SHUTDOWN;
+        }
+    }
+
     // Display the 'Message of the day' for the realm
     static bool HandleServerMotdCommand(ChatHandler* handler)
     {
         handler->PSendSysMessage(LANG_MOTD_CURRENT);
         for (uint32 i = 0; i < TOTAL_LOCALES; ++i)
+        {
+            if (!IsLocaleRegistered(LocaleConstant(i)))
+                continue;
+
             handler->PSendSysMessage(LANG_GENERIC_TWO_CURLIES_WITH_COLON, GetNameByLocaleConstant(LocaleConstant(i)), sMotdMgr->GetMotd(LocaleConstant(i)));
+        }
+
         return true;
     }
 
@@ -351,7 +403,7 @@ public:
 
         if (exitCode && *exitCode >= 0 && *exitCode <= 125)
         {
-            sWorld->ShutdownServ(delay, 0, *exitCode);
+            sWorld->ShutdownServ(delay, 0, *exitCode, strReason);
         }
         else
         {
@@ -404,7 +456,7 @@ public:
 
         if (exitCode && *exitCode >= 0 && *exitCode <= 125)
         {
-            sWorld->ShutdownServ(delay, SHUTDOWN_MASK_RESTART, *exitCode);
+            sWorld->ShutdownServ(delay, SHUTDOWN_MASK_RESTART, *exitCode, strReason);
         }
         else
         {
@@ -457,7 +509,7 @@ public:
 
         if (exitCode && *exitCode >= 0 && *exitCode <= 125)
         {
-            sWorld->ShutdownServ(delay, SHUTDOWN_MASK_RESTART | SHUTDOWN_MASK_IDLE, *exitCode);
+            sWorld->ShutdownServ(delay, SHUTDOWN_MASK_RESTART | SHUTDOWN_MASK_IDLE, *exitCode, strReason);
         }
         else
         {
@@ -510,7 +562,7 @@ public:
 
         if (exitCode && *exitCode >= 0 && *exitCode <= 125)
         {
-            sWorld->ShutdownServ(delay, SHUTDOWN_MASK_IDLE, *exitCode);
+            sWorld->ShutdownServ(delay, SHUTDOWN_MASK_IDLE, *exitCode, strReason);
         }
         else
         {
@@ -544,7 +596,7 @@ public:
             localeConstant = GetLocaleByName(locale);
         else
         {
-            handler->SendErrorMessage("locale ({}) is not valid. Valid locales: enUS, koKR, frFR, deDE, zhCN, zhWE, esES, esMX, ruRU.", locale);
+            handler->SendErrorMessage("locale ({}) is not valid. Valid locales: enUS, koKR, frFR, deDE, zhCN, zhTW, esES, esMX, ruRU.", locale);
             return false;
         }
 
@@ -605,6 +657,27 @@ public:
 
         handler->SendErrorMessage(LANG_USE_BOL);
         return false;
+    }
+
+    // Set the minimum security level allowed to log into this realm (realmlist.allowedSecurityLevel)
+    static bool HandleServerSetSecurityCommand(ChatHandler* handler, uint8 level)
+    {
+        if (level > SEC_ADMINISTRATOR)
+        {
+            handler->SendErrorMessage(LANG_COMMAND_SERVER_SET_SECURITY_ERROR, SEC_PLAYER, SEC_ADMINISTRATOR);
+            return false;
+        }
+
+        LoginDatabasePreparedStatement* stmt = LoginDatabase.GetPreparedStatement(LOGIN_UPD_REALMLIST_SECURITY_LEVEL);
+        stmt->SetData(0, level);
+        stmt->SetData(1, realm.Id.Realm);
+        LoginDatabase.Execute(stmt);
+
+        // Apply live; raising the limit kicks any now-disallowed sessions.
+        sWorld->SetPlayerSecurityLimit(AccountTypes(level));
+
+        handler->PSendSysMessage(LANG_COMMAND_SERVER_SET_SECURITY, level);
+        return true;
     }
 
     // Set the level of logging

@@ -61,21 +61,14 @@ void Player::Update(uint32 p_time)
     if (m_nextMailDelivereTime && m_nextMailDelivereTime <= GameTime::GetGameTime().count())
     {
         SendNewMail();
-        ++unReadMails;
 
-        // It will be recalculate at mailbox open (for unReadMails important
-        // non-0 until mailbox open, it also will be recalculated)
-        m_nextMailDelivereTime = time_t(0);
+        // Recount from the mailbox instead of clearing the timer: any mail that is still
+        // undelivered keeps its own delivery time and gets announced when it arrives
+        UpdateNextMailTimeAndUnreads();
     }
 
-    // Update cinematic location, if 500ms have passed and we're doing a
-    // cinematic now.
-    _cinematicMgr->m_cinematicDiff += p_time;
-    if (_cinematicMgr->m_cinematicCamera && _cinematicMgr->m_activeCinematicCameraId && GetMSTimeDiffToNow(_cinematicMgr->m_lastCinematicCheck) > CINEMATIC_UPDATEDIFF)
-    {
-        _cinematicMgr->m_lastCinematicCheck = getMSTime();
-        _cinematicMgr->UpdateCinematicLocation(p_time);
-    }
+    // Update cinematic camera (if needed)
+    _cinematicMgr.UpdateCinematic(p_time);
 
     // used to implement delayed far teleports
     SetMustDelayTeleport(true);
@@ -170,9 +163,14 @@ void Player::Update(uint32 p_time)
             // default combat reach 10
             /// @todo add weapon, skill check
 
+            // A vehicle passenger can neither turn nor move, and their stored position and
+            // orientation can be stale; never fail swing range or facing against the vehicle
+            // carrying them (e.g. Yogg-Saron's Constrictor Tentacle grab).
+            bool const victimIsVehicleBase = GetVehicleBase() == victim;
+
             if (isAttackReady(BASE_ATTACK))
             {
-                if (!IsWithinMeleeRange(victim))
+                if (!victimIsVehicleBase && !IsWithinMeleeRange(victim))
                 {
                     setAttackTimer(BASE_ATTACK, 100);
                     if (m_swingErrorMsg != 1) // send single time (client auto repeat)
@@ -182,7 +180,7 @@ void Player::Update(uint32 p_time)
                     }
                 }
                 // 120 degrees of radiant range, if player is not in boundary radius
-                else if (!IsWithinBoundaryRadius(victim) && !HasInArc(2 * float(M_PI) / 3, victim))
+                else if (!victimIsVehicleBase && !IsWithinBoundaryRadius(victim) && !HasInArc(2 * float(M_PI) / 3, victim))
                 {
                     setAttackTimer(BASE_ATTACK, 100);
                     if (m_swingErrorMsg != 2) // send single time (client auto repeat)
@@ -212,9 +210,9 @@ void Player::Update(uint32 p_time)
 
             if (HasOffhandWeaponForAttack() && isAttackReady(OFF_ATTACK))
             {
-                if (!IsWithinMeleeRange(victim))
+                if (!victimIsVehicleBase && !IsWithinMeleeRange(victim))
                     setAttackTimer(OFF_ATTACK, 100);
-                else if (!IsWithinBoundaryRadius(victim) && !HasInArc(2 * float(M_PI) / 3, victim))
+                else if (!victimIsVehicleBase && !IsWithinBoundaryRadius(victim) && !HasInArc(2 * float(M_PI) / 3, victim))
                     setAttackTimer(BASE_ATTACK, 100);
                 else
                 {
@@ -338,6 +336,8 @@ void Player::Update(uint32 p_time)
         }
     }
 
+    UpdateAdditionalSaves(p_time);
+
     // Handle Water/drowning
     HandleDrowning(p_time);
 
@@ -402,13 +402,11 @@ void Player::Update(uint32 p_time)
         // != GetCharmGUID())))
         RemovePet(pet, PET_SAVE_NOT_IN_SLOT, true);
 
-    // pussywizard:
     if (m_hostileReferenceCheckTimer <= p_time)
     {
         m_hostileReferenceCheckTimer = 15000;
         if (!GetMap()->IsDungeon())
-            getHostileRefMgr().deleteReferencesOutOfRange(
-                GetVisibilityRange());
+            GetCombatManager().EndCombatBeyondRange(GetVisibilityRange(), true);
     }
     else
         m_hostileReferenceCheckTimer -= p_time;
@@ -766,6 +764,28 @@ inline int SkillGainChance(uint32 SkillValue, uint32 GrayLevel,
     return sWorld->getIntConfig(CONFIG_SKILL_CHANCE_ORANGE) * 10;
 }
 
+inline int32 CraftSkillGainChance(uint32 skillValue, uint32 grayLevel, uint32 yellowLevel)
+{
+    int32 orangeChance = sWorld->getIntConfig(CONFIG_SKILL_CHANCE_ORANGE) * 10;
+    int32 grayChance = sWorld->getIntConfig(CONFIG_SKILL_CHANCE_GREY) * 10;
+
+    // Invalid or equal thresholds cannot be interpolated. Preserve the
+    // previous orange/gray boundary behavior for malformed DBC entries.
+    if (grayLevel <= yellowLevel)
+        return skillValue < grayLevel ? orangeChance : grayChance;
+
+    if (skillValue <= yellowLevel)
+        return orangeChance;
+    if (skillValue >= grayLevel)
+        return grayChance;
+
+    // Crafting skill-up chance falls linearly from orange at the yellow
+    // threshold to gray at the gray threshold. The green threshold is the
+    // midpoint of that range and therefore has a 50% chance by default.
+    return grayChance + int32(int64(grayLevel - skillValue) * (orangeChance - grayChance) /
+        (grayLevel - yellowLevel));
+}
+
 bool Player::UpdateGatherSkill(uint32 SkillId, uint32 SkillValue,
                                uint32 RedLevel, uint32 Multiplicator)
 {
@@ -857,12 +877,9 @@ bool Player::UpdateCraftSkill(uint32 spellid)
 
             return UpdateSkillPro(
                 _spell_idx->second->SkillLine,
-                SkillGainChance(SkillValue,
-                                _spell_idx->second->TrivialSkillLineRankHigh,
-                                (_spell_idx->second->TrivialSkillLineRankHigh +
-                                 _spell_idx->second->TrivialSkillLineRankLow) /
-                                    2,
-                                _spell_idx->second->TrivialSkillLineRankLow),
+                CraftSkillGainChance(SkillValue,
+                                     _spell_idx->second->TrivialSkillLineRankHigh,
+                                     _spell_idx->second->TrivialSkillLineRankLow),
                 craft_skill_gain);
         }
     }
@@ -947,6 +964,11 @@ bool Player::UpdateSkillPro(uint16 SkillId, int32 Chance, uint32 step)
 
     if (!MaxValue || !SkillValue || SkillValue >= MaxValue)
         return false;
+
+    // Trial account trade-skill cap (0 disables the cap)
+    if (uint32 trialSkillCap = sWorld->getIntConfig(CONFIG_TRIAL_TRADE_SKILL_CAP))
+        if (GetSession()->IsTrialAccount() && SkillValue >= trialSkillCap)
+            return false;
 
     int32 Roll = irand(1, 1000);
 
@@ -1239,7 +1261,8 @@ void Player::UpdateArea(uint32 newArea)
     {
         SetByteFlag(UNIT_FIELD_BYTES_2, 1, UNIT_BYTE2_FLAG_SANCTUARY);
         pvpInfo.IsInNoPvPArea = true;
-        CombatStopWithPets();
+        if (!duel && GetCombatManager().HasPvPCombat())
+            CombatStopWithPets();
     }
     else
         RemoveByteFlag(UNIT_FIELD_BYTES_2, 1, UNIT_BYTE2_FLAG_SANCTUARY);
@@ -1293,7 +1316,8 @@ void Player::UpdateZone(uint32 newZone, uint32 newArea, bool force)
         return;
 
     if (sWorld->getBoolConfig(CONFIG_WEATHER))
-        GetMap()->GetOrGenerateZoneDefaultWeather(newZone);
+        if (!GetMap()->GetOrGenerateZoneDefaultWeather(newZone))
+            Weather::SendFineWeatherUpdateToPlayer(this);
 
     GetMap()->SendZoneDynamicInfo(newZone, this);
 
@@ -1443,7 +1467,7 @@ void Player::UpdatePvPState()
 
     if (pvpInfo.IsHostile) // in hostile area
     {
-        if (IsInFlight()) // on taxi
+        if (IsInFlight() || !m_taxi.empty()) // on taxi or taxi pending resume after login
             return;
 
         if (!IsPvP() || pvpInfo.EndTimer != 0)
@@ -1547,6 +1571,16 @@ void Player::UpdatePvP(bool state, bool _override)
     sScriptMgr->OnPlayerPVPFlagChange(this, state);
 }
 
+void Player::AtExitCombat()
+{
+    Unit::AtExitCombat();
+    UpdatePotionCooldown();
+
+    if (IsClass(CLASS_DEATH_KNIGHT, CLASS_CONTEXT_ABILITY))
+        for (uint8 i = 0; i < MAX_RUNES; ++i)
+            SetGracePeriod(i, 0);
+}
+
 void Player::UpdatePotionCooldown(Spell* spell)
 {
     // no potion used i combat or still in combat
@@ -1600,8 +1634,8 @@ void Player::UpdateVisibilityForPlayer(bool mapChange)
         m_seer = this;
 
     Acore::VisibleNotifier notifier(*this, mapChange);
-    Cell::VisitObjects(m_seer, notifier, GetSightRange());
-    Cell::VisitFarVisibleObjects(m_seer, notifier, VISIBILITY_DISTANCE_GIGANTIC);
+    Cell::VisitObjects(GetSightPosition().GetPositionX(), GetSightPosition().GetPositionY(), GetMap(), notifier, GetSightRange());
+    Cell::VisitFarVisibleObjects(GetSightPosition().GetPositionX(), GetSightPosition().GetPositionY(), GetMap(), notifier, VISIBILITY_DISTANCE_GIGANTIC);
     notifier.SendToSelf();
 
     if (mapChange)
@@ -2017,7 +2051,16 @@ void Player::UpdateCharmedAI()
 
     if (!target || !IsValidAttackTarget(target))
     {
-        target = SelectNearbyTarget(nullptr, GetMap()->IsDungeon() ? 100.f : 30.f);
+        float const targetSearchDistance = GetMap()->IsDungeon() ? 100.f : 30.f;
+
+        // NPC mind controls should turn a player against their group before
+        // considering unrelated nearby units.
+        if (charmer->IsCreature())
+            target = SelectCharmedAIGroupTarget(targetSearchDistance);
+
+        if (!target)
+            target = SelectNearbyTarget(nullptr, targetSearchDistance);
+
         if (!target)
         {
             if (!HasUnitState(UNIT_STATE_FOLLOW))
@@ -2152,6 +2195,32 @@ void Player::UpdateCharmedAI()
             }
         }
     }
+}
+
+Unit* Player::SelectCharmedAIGroupTarget(float distance) const
+{
+    Group const* group = GetGroup();
+    if (!group)
+        return nullptr;
+
+    Player* target = nullptr;
+    for (GroupReference const* itr = group->GetFirstMember(); itr; itr = itr->next())
+    {
+        Player* member = itr->GetSource();
+        if (!member || member == this || !member->IsInWorld())
+            continue;
+
+        if (!IsWithinDistInMap(member, distance) || !IsWithinLOSInMap(member))
+            continue;
+
+        if ((!IsHostileTo(member) && !member->IsHostileTo(this)) || !IsValidAttackTarget(member))
+            continue;
+
+        if (!target || GetDistanceOrder(member, target))
+            target = member;
+    }
+
+    return target;
 }
 
 void Player::UpdateLootAchievements(LootItem* item, Loot* loot)
@@ -2316,9 +2385,9 @@ bool Player::CanExecutePendingSpellCastRequest(SpellInfo const* spellInfo)
     return true;
 }
 
-const PendingSpellCastRequest* Player::GetCastRequest(uint32 category) const
+PendingSpellCastRequest const* Player::GetCastRequest(uint32 category) const
 {
-    for (const PendingSpellCastRequest& request : SpellQueue)
+    for (PendingSpellCastRequest const& request : SpellQueue)
         if (request.category == category)
             return &request;
     return nullptr;
@@ -2391,4 +2460,50 @@ void Player::ProcessSpellQueue()
         else // If the first spell can't execute, stop processing
             break;
     }
+}
+
+// save only the data flagged by AdditionalSavingAddMask shortly after
+// important changes, so a crash loses at most a few seconds of them
+void Player::UpdateAdditionalSaves(uint32 p_time)
+{
+    if (!m_additionalSaveTimer || GetSession()->IsLoggingOut())
+        return;
+
+    if (m_additionalSaveTimer > p_time)
+    {
+        m_additionalSaveTimer -= p_time;
+        return;
+    }
+
+    uint8 mask = m_additionalSaveMask;
+    m_additionalSaveTimer = 0;
+    m_additionalSaveMask = 0;
+
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+
+    if (mask & ADDITIONAL_SAVING_INVENTORY_AND_GOLD)
+        SaveInventoryAndGoldToDB(trans);
+
+    if (mask & ADDITIONAL_SAVING_QUEST_STATUS)
+    {
+        _SaveQuestStatus(trans);
+
+        // if nothing changed, nothing will happen
+        _SaveDailyQuestStatus(trans);
+        _SaveWeeklyQuestStatus(trans);
+        _SaveSeasonalQuestStatus(trans);
+        _SaveMonthlyQuestStatus(trans);
+    }
+
+    if (mask & ADDITIONAL_SAVING_ACHIEVEMENTS)
+    {
+        m_achievementMgr->SaveToDB(trans);
+
+        // achievements are often earned together with skill or gold changes
+        // (professions, riding, wealth), save those too to keep the DB consistent
+        _SaveSkills(trans);
+        SaveGoldToDB(trans);
+    }
+
+    CharacterDatabase.CommitTransaction(trans);
 }

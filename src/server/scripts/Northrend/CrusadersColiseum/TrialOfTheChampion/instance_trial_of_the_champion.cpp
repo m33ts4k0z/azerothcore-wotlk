@@ -52,13 +52,12 @@ public:
         instance_trial_of_the_champion_InstanceMapScript(Map* pMap) : InstanceScript(pMap)
         {
             SetHeaders(DataHeader);
+            SetBossNumber(MAX_ENCOUNTER);
             Initialize();
         }
 
         bool CLEANED;
         uint32 InstanceProgress;
-        uint32 m_auiEncounter[MAX_ENCOUNTER];
-        std::string str_data;
 
         GuidList VehicleList;
         EventMap events;
@@ -82,7 +81,6 @@ public:
         void Initialize() override
         {
             InstanceProgress = 0;
-            memset(&m_auiEncounter, 0, sizeof(m_auiEncounter));
 
             VehicleList.clear();
             CLEANED = false;
@@ -93,15 +91,6 @@ public:
             temp2 = 0;
             shortver = false;
             bAchievIveHadWorse = true;
-        }
-
-        bool IsEncounterInProgress() const override
-        {
-            for( uint8 i = 0; i < MAX_ENCOUNTER; ++i )
-                if (m_auiEncounter[i] == IN_PROGRESS)
-                    return true;
-
-            return false;
         }
 
         void OnCreatureCreate(Creature* creature) override
@@ -175,18 +164,14 @@ public:
                 // Beginning vehicles:
                 case VEHICLE_ARGENT_WARHORSE:
                 case VEHICLE_ARGENT_BATTLEWORG:
-                    if (InstanceProgress < INSTANCE_PROGRESS_CHAMPIONS_UNMOUNTED && m_auiEncounter[0] == NOT_STARTED)
-                    {
-                        creature->DespawnOrUnsummon();
-                        creature->SetRespawnTime(3);
+                    if (InstanceProgress < INSTANCE_PROGRESS_CHAMPIONS_UNMOUNTED && !IsBossDone(BOSS_GRAND_CHAMPIONS))
                         VehicleList.push_back(creature->GetGUID());
-                    }
                     else
                         creature->DespawnOrUnsummon();
                     break;
             }
             if (creature->GetUInt32Value(UNIT_FIELD_MOUNTDISPLAYID))
-                if (const CreatureAddon* ca = creature->GetCreatureAddon())
+                if (CreatureAddon const* ca = creature->GetCreatureAddon())
                     if (ca->mount != creature->GetUInt32Value(UNIT_FIELD_MOUNTDISPLAYID))
                         creature->SetUInt32Value(UNIT_FIELD_MOUNTDISPLAYID, ca->mount);
         }
@@ -210,52 +195,49 @@ public:
             }
         }
 
-        std::string GetSaveData() override
+        void ReadSaveDataMore(std::istringstream& data) override
         {
-            OUT_SAVE_INST_DATA;
-            std::ostringstream saveStream;
-            saveStream << "T C " << m_auiEncounter[0] << ' ' << m_auiEncounter[1] << ' ' << m_auiEncounter[2] << ' ' << InstanceProgress;
-            str_data = saveStream.str();
-            OUT_SAVE_INST_DATA_COMPLETE;
-            return str_data;
+            data >> InstanceProgress;
+            if (InstanceProgress == INSTANCE_PROGRESS_CHAMPIONS_UNMOUNTED)
+                InstanceProgress = INSTANCE_PROGRESS_INITIAL;
         }
 
-        void Load(const char* in) override
+        void WriteSaveDataMore(std::ostringstream& data) override
         {
-            CLEANED = false;
-            events.Reset();
-            events.RescheduleEvent(EVENT_CHECK_PLAYERS, 0ms);
+            data << InstanceProgress;
+        }
 
-            if (!in)
+        bool SetBossState(uint32 type, EncounterState state) override
+        {
+            if (!InstanceScript::SetBossState(type, state))
+                return false;
+
+            switch (type)
             {
-                OUT_LOAD_INST_DATA_FAIL;
-                return;
+                case BOSS_ARGENT_CHALLENGE:
+                    if (state == DONE)
+                    {
+                        HandleGameObject(GO_EnterGateGUID, true);
+                        InstanceProgress = INSTANCE_PROGRESS_ARGENT_CHALLENGE_DIED;
+                        SaveToDB();
+                        events.ScheduleEvent(EVENT_ARGENT_CHALLENGE_RUN_MIDDLE, 0ms);
+                    }
+                    break;
+                case BOSS_BLACK_KNIGHT:
+                    if (state == NOT_STARTED)
+                        bAchievIveHadWorse = true;
+                    else if (state == DONE)
+                    {
+                        HandleGameObject(GO_EnterGateGUID, true);
+                        InstanceProgress = INSTANCE_PROGRESS_FINISHED;
+                        SaveToDB();
+                    }
+                    break;
+                default:
+                    break;
             }
 
-            OUT_LOAD_INST_DATA(in);
-
-            char dataHead1, dataHead2;
-            uint16 data0, data1, data2, data3;
-            std::istringstream loadStream(in);
-            loadStream >> dataHead1 >> dataHead2 >> data0 >> data1 >> data2 >> data3;
-
-            if (dataHead1 == 'T' && dataHead2 == 'C')
-            {
-                m_auiEncounter[0] = data0;
-                m_auiEncounter[1] = data1;
-                m_auiEncounter[2] = data2;
-                InstanceProgress = data3;
-                if (InstanceProgress == INSTANCE_PROGRESS_CHAMPIONS_UNMOUNTED)
-                    InstanceProgress = INSTANCE_PROGRESS_INITIAL;
-
-                for( uint8 i = 0; i < MAX_ENCOUNTER; ++i )
-                    if (m_auiEncounter[i] == IN_PROGRESS)
-                        m_auiEncounter[i] = NOT_STARTED;
-            }
-            else
-                OUT_LOAD_INST_DATA_FAIL;
-
-            OUT_LOAD_INST_DATA_COMPLETE;
+            return true;
         }
 
         // EVENT STUFF BELOW:
@@ -273,7 +255,7 @@ public:
         bool DoNeedCleanup(Player* ignoredPlayer = nullptr)
         {
             uint8 aliveCount = 0;
-            for (const auto &itr: instance->GetPlayers())
+            for (auto const& itr: instance->GetPlayers())
             {
                 if (Player* plr = itr.GetSource())
                 {
@@ -301,6 +283,7 @@ public:
             switch (InstanceProgress)
             {
                 case INSTANCE_PROGRESS_INITIAL:
+                    break;
                 case INSTANCE_PROGRESS_GRAND_CHAMPIONS_REACHED_DEST:
                 case INSTANCE_PROGRESS_CHAMPION_GROUP_DIED_1:
                 case INSTANCE_PROGRESS_CHAMPION_GROUP_DIED_2:
@@ -309,10 +292,8 @@ public:
                     {
                         for (ObjectGuid const& guid : VehicleList)
                             if (Creature* veh = instance->GetCreature(guid))
-                            {
-                                veh->DespawnOrUnsummon();
-                                veh->SetRespawnTime(3);
-                            }
+                                veh->DespawnOrUnsummon(0ms, 3s);
+                        VehicleList.clear();
                         for( uint8 i = 0; i < 3; ++i )
                         {
                             for( uint8 j = 0; j < 3; ++j )
@@ -327,11 +308,9 @@ public:
                         }
                         if (Creature* c = instance->GetCreature(NPC_AnnouncerGUID))
                         {
-                            c->DespawnOrUnsummon();
                             c->SetHomePosition(748.309f, 619.488f, 411.172f, 4.71239f);
-                            c->SetPosition(748.309f, 619.488f, 411.172f, 4.71239f);
-                            c->SetRespawnTime(3);
                             c->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+                            c->DespawnOrUnsummon(0ms, 3s);
                         }
                         InstanceProgress = INSTANCE_PROGRESS_INITIAL;
                     }
@@ -340,10 +319,7 @@ public:
                     {
                         if (Creature* announcer = instance->GetCreature(NPC_AnnouncerGUID))
                         {
-                            announcer->DespawnOrUnsummon();
                             announcer->SetHomePosition(735.81f, 661.92f, 412.39f, 4.714f);
-                            announcer->SetPosition(735.81f, 661.92f, 412.39f, 4.714f);
-                            announcer->SetRespawnTime(3);
                             announcer->RemoveNpcFlag(UNIT_NPC_FLAG_GOSSIP);
 
                             for( uint8 i = 0; i < 3; ++i )
@@ -376,6 +352,7 @@ public:
                                             break;
                                     }
                                 }
+                            announcer->DespawnOrUnsummon(0ms, 3s);
                         }
                     }
                     break;
@@ -398,11 +375,9 @@ public:
                         NPC_ArgentChampionGUID.Clear();
                         if (Creature* c = instance->GetCreature(NPC_AnnouncerGUID))
                         {
-                            c->DespawnOrUnsummon();
                             c->SetHomePosition(743.14f, 628.77f, 411.2f, 4.71239f);
-                            c->SetPosition(743.14f, 628.77f, 411.2f, 4.71239f);
-                            c->SetRespawnTime(3);
                             c->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+                            c->DespawnOrUnsummon(0ms, 3s);
                         }
                         NPC_MemoryEntry = 0;
                         InstanceProgress = INSTANCE_PROGRESS_CHAMPIONS_DEAD;
@@ -422,11 +397,9 @@ public:
                         NPC_BlackKnightGUID.Clear();
                         if (Creature* c = instance->GetCreature(NPC_AnnouncerGUID))
                         {
-                            c->DespawnOrUnsummon();
                             c->SetHomePosition(743.14f, 628.77f, 411.2f, 4.71239f);
-                            c->SetPosition(743.14f, 628.77f, 411.2f, 4.71239f);
-                            c->SetRespawnTime(3);
                             c->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+                            c->DespawnOrUnsummon(0ms, 3s);
                         }
                         InstanceProgress = INSTANCE_PROGRESS_ARGENT_CHALLENGE_DIED;
                     }
@@ -613,7 +586,7 @@ public:
                         VehicleList.clear();
                         uiData = DONE;
                         InstanceProgress = INSTANCE_PROGRESS_CHAMPIONS_DEAD;
-                        m_auiEncounter[0] = DONE;
+                        SetBossState(BOSS_GRAND_CHAMPIONS, DONE);
                         bool creditCasted = false;
                         for( uint8 i = 0; i < 3; ++i )
                             if (Creature* c = instance->GetCreature(NPC_GrandChampionGUID[i]))
@@ -647,38 +620,12 @@ public:
                         events.ScheduleEvent(EVENT_ARGENT_CHALLENGE_MOVE_FORWARD, 0ms);
                     }
                     break;
-                case BOSS_ARGENT_CHALLENGE:
-                    {
-                        m_auiEncounter[1] = uiData;
-                        if (uiData == DONE)
-                        {
-                            HandleGameObject(GO_EnterGateGUID, true);
-                            InstanceProgress = INSTANCE_PROGRESS_ARGENT_CHALLENGE_DIED;
-                            events.ScheduleEvent(EVENT_ARGENT_CHALLENGE_RUN_MIDDLE, 0ms);
-                        }
-                    }
-                    break;
                 case DATA_MEMORY_ENTRY:
                     NPC_MemoryEntry = uiData;
                     break;
                 case DATA_SKELETAL_GRYPHON_LANDED:
                     {
                         events.ScheduleEvent(EVENT_START_BLACK_KNIGHT_SCENE, 3s);
-                    }
-                    break;
-                case BOSS_BLACK_KNIGHT:
-                    {
-                        m_auiEncounter[2] = uiData;
-                        if (uiData == NOT_STARTED)
-                        {
-                            HandleGameObject(GO_EnterGateGUID, false);
-                            bAchievIveHadWorse = true;
-                        }
-                        else if (uiData == DONE)
-                        {
-                            HandleGameObject(GO_EnterGateGUID, true);
-                            InstanceProgress = INSTANCE_PROGRESS_FINISHED;
-                        }
                     }
                     break;
                 case DATA_ACHIEV_IVE_HAD_WORSE:
@@ -1137,6 +1084,7 @@ public:
                         if (Creature* announcer = instance->GetCreature(NPC_AnnouncerGUID))
                             if (Creature* bk_vehicle = announcer->SummonCreature(VEHICLE_BLACK_KNIGHT, 769.834f, 651.915f, 447.035f, 0.0f))
                             {
+                                HandleGameObject(GO_EnterGateGUID, false);
                                 NPC_BlackKnightVehicleGUID = bk_vehicle->GetGUID();
                                 bk_vehicle->SetReactState(REACT_PASSIVE);
                                 bk_vehicle->SetFacingTo(M_PI);

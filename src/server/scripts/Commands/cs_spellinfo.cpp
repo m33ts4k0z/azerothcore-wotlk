@@ -19,6 +19,7 @@
 #include "CommandScript.h"
 #include "DBCStructure.h"
 #include "Language.h"
+#include "RBAC.h"
 #include "SmartEnum.h"
 #include "SpellAuraDefines.h"
 #include "SpellInfo.h"
@@ -35,10 +36,10 @@ public:
     {
         static ChatCommandTable spellinfoCommandTable =
         {
-            { "attributes", HandleSpellInfoAttributesCommand, SEC_GAMEMASTER, Console::Yes },
-            { "effects",    HandleSpellInfoEffectsCommand,    SEC_GAMEMASTER, Console::Yes },
-            { "targets",    HandleSpellInfoTargetsCommand,    SEC_GAMEMASTER, Console::Yes },
-            { "all",        HandleSpellInfoAllCommand,        SEC_GAMEMASTER, Console::Yes }
+            { "attributes", HandleSpellInfoAttributesCommand, rbac::RBAC_PERM_COMMAND_SPELLINFO_ATTRIBUTES, Console::Yes },
+            { "effects",    HandleSpellInfoEffectsCommand,    rbac::RBAC_PERM_COMMAND_SPELLINFO_EFFECTS,    Console::Yes },
+            { "targets",    HandleSpellInfoTargetsCommand,    rbac::RBAC_PERM_COMMAND_SPELLINFO_TARGETS,    Console::Yes },
+            { "all",        HandleSpellInfoAllCommand,        rbac::RBAC_PERM_COMMAND_SPELLINFO_ALL,        Console::Yes }
         };
 
         static ChatCommandTable commandTable =
@@ -446,7 +447,7 @@ public:
             case SPELL_AURA_HASTE_RANGED: return "SPELL_AURA_HASTE_RANGED";
             case SPELL_AURA_MOD_MANA_REGEN_FROM_STAT: return "SPELL_AURA_MOD_MANA_REGEN_FROM_STAT";
             case SPELL_AURA_MOD_RATING_FROM_STAT: return "SPELL_AURA_MOD_RATING_FROM_STAT";
-            case SPELL_AURA_IGNORED: return "SPELL_AURA_IGNORED";
+            case SPELL_AURA_MOD_DETAUNT: return "SPELL_AURA_MOD_DETAUNT";
             case SPELL_AURA_222: return "SPELL_AURA_222";
             case SPELL_AURA_RAID_PROC_FROM_CHARGE: return "SPELL_AURA_RAID_PROC_FROM_CHARGE";
             case SPELL_AURA_224: return "SPELL_AURA_224";
@@ -494,7 +495,7 @@ public:
             case SPELL_AURA_266: return "SPELL_AURA_266";
             case SPELL_AURA_MOD_IMMUNE_AURA_APPLY_SCHOOL: return "SPELL_AURA_MOD_IMMUNE_AURA_APPLY_SCHOOL";
             case SPELL_AURA_MOD_ATTACK_POWER_OF_STAT_PERCENT: return "SPELL_AURA_MOD_ATTACK_POWER_OF_STAT_PERCENT";
-            case SPELL_AURA_MOD_IGNORE_TARGET_RESIST: return "SPELL_AURA_MOD_IGNORE_TARGET_RESIST";
+            case SPELL_AURA_MOD_IGNORE_TARGET_RESIST_MODIFIERS: return "SPELL_AURA_MOD_IGNORE_TARGET_RESIST_MODIFIERS";
             case SPELL_AURA_MOD_ABILITY_IGNORE_TARGET_RESIST: return "SPELL_AURA_MOD_ABILITY_IGNORE_TARGET_RESIST";
             case SPELL_AURA_MOD_DAMAGE_FROM_CASTER: return "SPELL_AURA_MOD_DAMAGE_FROM_CASTER";
             case SPELL_AURA_IGNORE_MELEE_RESET: return "SPELL_AURA_IGNORE_MELEE_RESET";
@@ -785,7 +786,7 @@ public:
             if (spell->AttributesCu & SPELL_ATTR0_CU_DONT_BREAK_STEALTH)    handler->PSendSysMessage("  - SPELL_ATTR0_CU_DONT_BREAK_STEALTH");
             if (spell->AttributesCu & SPELL_ATTR0_CU_NO_PVP_FLAG)           handler->PSendSysMessage("  - SPELL_ATTR0_CU_NO_PVP_FLAG");
             if (spell->AttributesCu & SPELL_ATTR0_CU_DIRECT_DAMAGE)         handler->PSendSysMessage("  - SPELL_ATTR0_CU_DIRECT_DAMAGE");
-            if (spell->AttributesCu & SPELL_ATTR0_CU_CHARGE)                handler->PSendSysMessage("  - SPELL_ATTR0_CU_CHARGE");
+            if (spell->AttributesCu & SPELL_ATTR0_CU_IGNORE_BINARY)         handler->PSendSysMessage("  - SPELL_ATTR0_CU_IGNORE_BINARY");
             if (spell->AttributesCu & SPELL_ATTR0_CU_PICKPOCKET)            handler->PSendSysMessage("  - SPELL_ATTR0_CU_PICKPOCKET");
             if (spell->AttributesCu & SPELL_ATTR0_CU_IGNORE_EVADE)          handler->PSendSysMessage("  - SPELL_ATTR0_CU_IGNORE_EVADE");
             if (spell->AttributesCu & SPELL_ATTR0_CU_NEGATIVE_EFF0)         handler->PSendSysMessage("  - SPELL_ATTR0_CU_NEGATIVE_EFF0");

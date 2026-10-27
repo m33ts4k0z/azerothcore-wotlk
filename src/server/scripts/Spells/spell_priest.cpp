@@ -15,7 +15,6 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "CreatureScript.h"
 #include "GridNotifiers.h"
 #include "Player.h"
 #include "SpellAuraEffects.h"
@@ -360,6 +359,22 @@ class spell_pri_hymn_of_hope : public SpellScript
     }
 };
 
+static bool IsLightwellEntry(uint32 entry)
+{
+    switch (entry)
+    {
+        case PRIEST_LIGHTWELL_NPC_1:
+        case PRIEST_LIGHTWELL_NPC_2:
+        case PRIEST_LIGHTWELL_NPC_3:
+        case PRIEST_LIGHTWELL_NPC_4:
+        case PRIEST_LIGHTWELL_NPC_5:
+        case PRIEST_LIGHTWELL_NPC_6:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // 60123 - Lightwell
 class spell_pri_lightwell : public SpellScript
 {
@@ -390,7 +405,8 @@ class spell_pri_lightwell : public SpellScript
         // proc a spellcast
         if (Aura* chargesAura = caster->GetAura(SPELL_PRIEST_LIGHTWELL_CHARGES))
         {
-            caster->CastSpell(GetHitUnit(), lightwellRenew, caster->ToTempSummon()->GetSummonerGUID());
+            caster->CastSpell(GetHitUnit(), lightwellRenew, true, nullptr, nullptr,
+                caster->ToTempSummon()->GetSummonerGUID());
             if (chargesAura->ModCharges(-1))
                 caster->ToTempSummon()->UnSummon();
         }
@@ -440,16 +456,26 @@ class spell_pri_lightwell_renew : public AuraScript
 
     void HandleUpdateSpellclick(AuraEffect const* /*aurEff*/, AuraEffectHandleModes /*mode*/)
     {
-        if (Unit* caster = GetCaster())
+        Player* player = GetTarget()->ToPlayer();
+        if (!player)
+            return;
+
+        Unit* caster = GetCaster();
+        if (!caster)
+            return;
+
+        // Spellclick gets hidden per player on the well's own NPC flags, so the wells are what
+        // need resending here, not the aura's caster (the priest).
+        for (Unit* controlled : caster->m_Controlled)
         {
-            if (Player* player = GetTarget()->ToPlayer())
-            {
-                UpdateData data;
-                WorldPacket packet;
-                caster->BuildValuesUpdateBlockForPlayer(&data, player);
-                data.BuildPacket(packet);
-                player->SendDirectMessage(&packet);
-            }
+            if (!IsLightwellEntry(controlled->GetEntry()))
+                continue;
+
+            UpdateData data;
+            WorldPacket packet;
+            controlled->BuildValuesUpdateBlockForPlayer(&data, player);
+            data.BuildPacket(packet);
+            player->SendDirectMessage(&packet);
         }
     }
 
@@ -474,7 +500,7 @@ class spell_pri_mana_burn : public SpellScript
     void HandleAfterHit()
     {
         if (Unit* unitTarget = GetHitUnit())
-            unitTarget->RemoveAurasWithMechanic((1 << MECHANIC_FEAR) | (1 << MECHANIC_POLYMORPH));
+            unitTarget->RemoveAurasWithMechanic((1ULL << MECHANIC_FEAR) | (1ULL << MECHANIC_POLYMORPH));
     }
 
     void Register() override
@@ -632,7 +658,7 @@ class spell_pri_penance : public SpellScript
 };
 
 // -17 - Power Word: Shield
-static int32 CalculateSpellAmount(Unit* caster, int32 amount, SpellInfo const* spellInfo, const AuraEffect* aurEff)
+static int32 CalculateSpellAmount(Unit* caster, int32 amount, SpellInfo const* spellInfo, AuraEffect const* aurEff)
 {
     // +80.68% from sp bonus
     float bonus = 0.8068f;
@@ -915,9 +941,8 @@ class spell_pri_mind_control : public AuraScript
         {
             if (Unit* target = GetTarget())
             {
-                uint32 duration = static_cast<uint32>(GetDuration());
-                caster->SetInCombatWith(target, duration);
-                target->SetInCombatWith(caster, duration);
+                caster->SetInCombatWith(target);
+                target->SetInCombatWith(caster);
             }
         }
     }

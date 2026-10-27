@@ -16,7 +16,6 @@
  */
 
 #include "Containers.h"
-#include "CreatureScript.h"
 #include "GameTime.h"
 #include "GridNotifiers.h"
 #include "Player.h"
@@ -640,6 +639,12 @@ class spell_dru_lifebloom : public AuraScript
 {
     PrepareAuraScript(spell_dru_lifebloom);
 
+    enum Spells
+    {
+        SPELL_DRUID_AURA_OF_DESPAIR_1 = 62692,
+        SPELL_DRUID_AURA_OF_DESPAIR_2 = 64848
+    };
+
     bool Validate(SpellInfo const* /*spell*/) override
     {
         return ValidateSpellInfo({ SPELL_DRUID_LIFEBLOOM_FINAL_HEAL, SPELL_DRUID_LIFEBLOOM_ENERGIZE });
@@ -660,8 +665,12 @@ class spell_dru_lifebloom : public AuraScript
         {
             healAmount = caster->SpellHealingBonusDone(GetTarget(), finalHeal, healAmount, HEAL, aurEff->GetEffIndex(), 0.0f, stack);
             healAmount = GetTarget()->SpellHealingBonusTaken(caster, finalHeal, healAmount, HEAL, stack);
+
             // restore mana
-            int32 returnmana = (GetSpellInfo()->ManaCostPercentage * caster->GetCreateMana() / 100) * stack / 2;
+            int32 returnmana = GetSpellInfo()->ManaCostPercentage * caster->GetCreateMana() * stack / 100 / 2;
+            if (caster->HasAnyAuras(SPELL_DRUID_AURA_OF_DESPAIR_1, SPELL_DRUID_AURA_OF_DESPAIR_2))
+                returnmana /= 2;
+
             caster->CastCustomSpell(caster, SPELL_DRUID_LIFEBLOOM_ENERGIZE, &returnmana, nullptr, nullptr, true, nullptr, aurEff, GetCasterGUID());
         }
         GetTarget()->CastCustomSpell(GetTarget(), SPELL_DRUID_LIFEBLOOM_FINAL_HEAL, &healAmount, nullptr, nullptr, true, nullptr, aurEff, GetCasterGUID());
@@ -684,6 +693,9 @@ class spell_dru_lifebloom : public AuraScript
 
                     // mana amount
                     int32 mana = CalculatePct(caster->GetCreateMana(), GetSpellInfo()->ManaCostPercentage) * dispelInfo->GetRemovedCharges() / 2;
+                    if (caster->HasAnyAuras(SPELL_DRUID_AURA_OF_DESPAIR_1, SPELL_DRUID_AURA_OF_DESPAIR_2))
+                        mana /= 2;
+
                     caster->CastCustomSpell(caster, SPELL_DRUID_LIFEBLOOM_ENERGIZE, &mana, nullptr, nullptr, true, nullptr, nullptr, GetCasterGUID());
                 }
                 target->CastCustomSpell(target, SPELL_DRUID_LIFEBLOOM_FINAL_HEAL, &healAmount, nullptr, nullptr, true, nullptr, nullptr, GetCasterGUID());
@@ -771,7 +783,7 @@ class spell_dru_moonkin_form_passive : public AuraScript
     void Absorb(AuraEffect* /*aurEff*/, DamageInfo& dmgInfo, uint32& absorbAmount)
     {
         // reduces all damage taken while Stunned in Moonkin Form
-        if (GetTarget()->GetUnitFlags() & (UNIT_FLAG_STUNNED) && GetTarget()->HasAuraWithMechanic(1 << MECHANIC_STUN))
+        if (GetTarget()->GetUnitFlags() & (UNIT_FLAG_STUNNED) && GetTarget()->HasAuraWithMechanic(1ULL << MECHANIC_STUN))
             absorbAmount = CalculatePct(dmgInfo.GetDamage(), absorbPct);
     }
 
@@ -838,7 +850,7 @@ class spell_dru_primal_tenacity : public AuraScript
     void Absorb(AuraEffect* /*aurEff*/, DamageInfo& dmgInfo, uint32& absorbAmount)
     {
         // reduces all damage taken while Stunned in Cat Form
-        if (GetTarget()->GetShapeshiftForm() == FORM_CAT && GetTarget()->HasUnitFlag(UNIT_FLAG_STUNNED) && GetTarget()->HasAuraWithMechanic(1 << MECHANIC_STUN))
+        if (GetTarget()->GetShapeshiftForm() == FORM_CAT && GetTarget()->HasUnitFlag(UNIT_FLAG_STUNNED) && GetTarget()->HasAuraWithMechanic(1ULL << MECHANIC_STUN))
             absorbAmount = CalculatePct(dmgInfo.GetDamage(), absorbPct);
     }
 

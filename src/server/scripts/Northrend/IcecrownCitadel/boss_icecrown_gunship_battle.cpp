@@ -688,14 +688,14 @@ public:
             if (_instance->GetBossState(DATA_ICECROWN_GUNSHIP_BATTLE) != IN_PROGRESS)
                 return;
 
+            // Blizzlike: ship wipes when all players are in cannons (vehicles) with nobody on deck
+            // See: azerothcore/azerothcore-wotlk#17856
             bool playerOnDeck = false;
             me->GetMap()->DoForAllPlayers([&](Player* player)
                 {
                     if (!player->GetVehicle() && player->IsAlive())
                         playerOnDeck = true;
                 });
-
-            // Wipe if no player is on the deck
             if (!playerOnDeck)
             {
                 // Script runs on enemy ship. We want to kill our ship.
@@ -980,7 +980,7 @@ public:
                         for (Map::PlayerList::const_iterator itr = pl.begin(); itr != pl.end(); ++itr)
                             if (Player* p = itr->GetSource())
                                 if (!p->IsGameMaster())
-                                    p->SetInCombatState(true);
+                                    p->SetInCombatWith(me);
                         _events.ScheduleEvent(EVENT_KEEP_PLAYER_IN_COMBAT, 4s);
                     }
                     break;
@@ -1319,7 +1319,7 @@ public:
                         for (Map::PlayerList::const_iterator itr = pl.begin(); itr != pl.end(); ++itr)
                             if (Player* p = itr->GetSource())
                                 if (!p->IsGameMaster())
-                                    p->SetInCombatState(true);
+                                    p->SetInCombatWith(me);
                         _events.ScheduleEvent(EVENT_KEEP_PLAYER_IN_COMBAT, 4s);
                     }
                     break;
@@ -2472,7 +2472,7 @@ public:
     bool operator()(WorldObject* unit)
     {
         return !unit->IsPlayer() || unit->GetPositionZ() > 478.0f || !unit->GetTransport() || unit->GetTransport()->GetEntry() != _entry
-        || unit->GetMapHeight(unit->GetPhaseMask(), unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ()) < 465.0f;
+        || unit->GetMapHeight(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ()) < 465.0f;
     }
 
 private:
@@ -2501,9 +2501,13 @@ class spell_igb_rocket_artillery : public SpellScript
     void HandleScript(SpellEffIndex effIndex)
     {
         PreventHitDefaultEffect(effIndex);
-        GetCaster()->CastSpell(GetHitUnit()->GetPositionX(), GetHitUnit()->GetPositionY(),
-            GetHitUnit()->GetMapHeight(GetCaster()->GetPhaseMask(), GetHitUnit()->GetPositionX(), GetHitUnit()->GetPositionY(), GetHitUnit()->GetPositionZ()),
-            uint32(GetEffectValue()), TRIGGERED_NONE);
+
+        Unit* target = GetHitUnit();
+        float x = target->GetPositionX();
+        float y = target->GetPositionY();
+        float z = target->GetMapHeight(x, y, target->GetPositionZ());
+
+        GetCaster()->CastSpell(x, y, z, uint32(GetEffectValue()), TRIGGERED_NONE);
     }
 
     void Register() override

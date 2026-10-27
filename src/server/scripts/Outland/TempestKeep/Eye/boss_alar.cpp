@@ -98,10 +98,6 @@ struct boss_alar : public BossAI
     boss_alar(Creature* creature) : BossAI(creature, DATA_ALAR)
     {
         me->SetCombatMovement(false);
-        scheduler.SetValidator([this]
-        {
-            return !me->HasUnitState(UNIT_STATE_CASTING);
-        });
     }
 
     void Reset() override
@@ -172,7 +168,7 @@ struct boss_alar : public BossAI
     {
         if (why == EVADE_REASON_BOUNDARY)
             BossAI::EnterEvadeMode(why);
-        else if (me->GetThreatMgr().GetThreatList().empty())
+        else if (me->GetThreatMgr().IsThreatListEmpty(true))
             BossAI::EnterEvadeMode(why);
     }
 
@@ -258,6 +254,7 @@ struct boss_alar : public BossAI
         }, 30s);
         ScheduleTimedEvent(34s, [&]
         {
+            _noMelee = true;
             me->GetMotionMaster()->MovePoint(POINT_DIVE, alarPoints[POINT_DIVE], FORCED_MOVEMENT_NONE, 0.f, false, true);
             scheduler.DelayAll(15s);
         }, 57s);
@@ -345,8 +342,18 @@ struct boss_alar : public BossAI
     {
         scheduler.Schedule(timer, GROUP_FLAME_BUFFET, [this](TaskContext context)
         {
-            if (!me->SelectNearestTarget(me->GetCombatReach()) && !me->isMoving())
-                DoCastAOE(SPELL_FLAME_BUFFET);
+            if (_platform < POINT_MIDDLE)
+            {
+                if (!me->SelectNearestTarget(me->GetCombatReach()) && !me->isMoving())
+                    DoCastAOE(SPELL_FLAME_BUFFET);
+            }
+            else if (!_noMelee && !me->HasUnitState(UNIT_STATE_CHARGING))
+            {
+                // Phase two checks the tank, not nearby DPS or the random Charge target.
+                if (Unit* victim = me->GetThreatMgr().GetCurrentVictim())
+                    if (!me->IsWithinMeleeRange(victim))
+                        DoCastAOE(SPELL_FLAME_BUFFET);
+            }
 
             context.Repeat(2s);
         });

@@ -129,6 +129,13 @@ struct boss_bjarngrim : public npc_escortAI
         AddWaypoint(7, 1262.0f, -26.9f, 33.5f, 0);
     }
 
+    void JustRespawned() override
+    {
+        npc_escortAI::JustRespawned();
+        me->SetWalk(true);
+        Start(true, ObjectGuid::Empty, nullptr, false, true);
+    }
+
     void Reset() override
     {
         events.Reset();
@@ -138,7 +145,8 @@ struct boss_bjarngrim : public npc_escortAI
             if (Creature* dwarf = me->SummonCreature(NPC_STORMFORGED_LIEUTENANT, me->GetPositionX() + urand(4, 12), me->GetPositionY() + urand(4, 12), me->GetPositionZ()))
             {
                 float angle = i == 0 ? 2.5f : 3.78f;
-                dwarf->GetMotionMaster()->MoveFollow(me, 3, angle);
+                // Keep following as the default movement when chase/evade movement ends.
+                dwarf->GetMotionMaster()->MoveFollow(me, 3, angle, MOTION_SLOT_IDLE);
                 summons.Summon(dwarf);
             }
 
@@ -267,6 +275,7 @@ struct boss_bjarngrim : public npc_escortAI
         m_uiStance = stance;
     }
 
+    using CreatureAI::WaypointReached;
     void WaypointReached(uint32 Point) override
     {
         if (Point == 1)
@@ -398,6 +407,8 @@ struct npc_stormforged_lieutenant : public ScriptedAI
 
     void Reset() override
     {
+        events.Reset();
+
         if (me->IsSummon())
             BjarngrimGUID = me->ToTempSummon()->GetSummonerGUID();
         else

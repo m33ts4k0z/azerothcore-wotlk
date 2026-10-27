@@ -74,6 +74,8 @@ enum Spells
     SPELL_ARMAGEDDON_MISSILE                    = 45909,
     SPELL_CUSTOM_08_STATE                       = 45800,
     SPELL_DESTROY_ALL_DRAKES                    = 46707,
+    SPELL_KNOCKBACK                             = 47113,
+    SPELL_SWAT                                  = 46548,
 
     // Sinister Reflections
     SPELL_SINISTER_REFLECTION_SUMMON            = 45891,
@@ -86,6 +88,10 @@ enum Spells
 
     // Misc
     SPELL_ANVEENA_ENERGY_DRAIN                  = 46410,
+    SPELL_ARCANE_BOLT                           = 45670,
+    // TODO
+    // 45670 is an aura that triggers 45666; 45666 needs to be scripted
+    // SPELL_ARCANE_BOLT_DAMAGE                    = 45666,
     SPELL_RING_OF_BLUE_FLAMES                   = 45825,
     SPELL_SUMMON_BLUE_DRAKE                     = 45836,
     SPELL_VENGEANCE_OF_THE_BLUE_FLIGHT          = 45839,
@@ -102,7 +108,10 @@ enum Misc
     PHASE_SACRIFICE                 = 5,
 
     ACTION_START_POST_EVENT         = 1,
-    ACTION_NO_KILL_TALK             = 2
+    ACTION_NO_KILL_TALK             = 2,
+    ACTION_START_AERIAL_SUPPORT     = 3,
+
+    DATA_HAND_ENGAGED               = 1
 };
 
 class CastArmageddon : public BasicEvent
@@ -126,10 +135,6 @@ struct npc_kiljaeden_controller : public NullCreatureAI
     npc_kiljaeden_controller(Creature* creature) : NullCreatureAI(creature), summons(me)
     {
         instance = creature->GetInstanceScript();
-        scheduler.SetValidator([this]
-        {
-            return !me->HasUnitState(UNIT_STATE_CASTING);
-        });
     }
 
     void ResetOrbs()
@@ -177,6 +182,7 @@ struct npc_kiljaeden_controller : public NullCreatureAI
     void JustSummoned(Creature* summon) override
     {
         summons.Summon(summon);
+
         if (summon->GetEntry() == NPC_SINISTER_REFLECTION)
         {
             summon->m_Events.AddEventAtOffset([summon] {
@@ -185,7 +191,51 @@ struct npc_kiljaeden_controller : public NullCreatureAI
             }, 5s);
         }
         else if (summon->GetEntry() == NPC_KALECGOS_KJ)
+        {
             summon->setActive(true);
+            summon->SetCanFly(true);
+            summon->SetDisableGravity(true);
+            summon->SetAnimTier(AnimTier::Fly);
+            summon->GetMotionMaster()->MoveWaypoint(NPC_KALECGOS_KJ * 10, true);
+            summon->AI()->DoAction(ACTION_START_AERIAL_SUPPORT);
+        }
+    }
+
+    void StartEncounter()
+    {
+        if (instance->GetBossState(DATA_KILJAEDEN) != NOT_STARTED)
+            return;
+
+        // Set before pulling the Hands in, their aggro calls back into here
+        instance->SetBossState(DATA_KILJAEDEN, IN_PROGRESS);
+        summons.DoZoneInCombat(NPC_HAND_OF_THE_DECEIVER);
+
+        scheduler.Schedule(1s, [this](TaskContext context) {
+            auto const& playerList = me->GetMap()->GetPlayers();
+            for (auto const& playerRef : playerList)
+                if (Player* player = playerRef.GetSource())
+                    if (!player->IsGameMaster() && me->GetDistance2d(player) < 60.0f && player->IsAlive())
+                    {
+                        context.Repeat();
+                        return;
+                    }
+
+            CreatureAI::EnterEvadeMode();
+        });
+    }
+
+    void SetData(uint32 type, uint32 /*data*/) override
+    {
+        if (type == DATA_HAND_ENGAGED)
+            StartEncounter();
+    }
+
+    void SummonedCreatureEvade(Creature* summon) override
+    {
+        if (summon->GetEntry() != NPC_HAND_OF_THE_DECEIVER || instance->GetBossState(DATA_KILJAEDEN) != IN_PROGRESS)
+            return;
+
+        CreatureAI::EnterEvadeMode();
     }
 
     void SummonedCreatureDies(Creature* summon, Unit*) override
@@ -194,26 +244,13 @@ struct npc_kiljaeden_controller : public NullCreatureAI
 
         if (summon->GetEntry() == NPC_HAND_OF_THE_DECEIVER)
         {
-            instance->SetBossState(DATA_KILJAEDEN, IN_PROGRESS);
-
-            scheduler.Schedule(1s, [this](TaskContext context) {
-                auto const& playerList = me->GetMap()->GetPlayers();
-                for (auto const& playerRef : playerList)
-                    if (Player* player = playerRef.GetSource())
-                        if (!player->IsGameMaster() && me->GetDistance2d(player) < 60.0f && player->IsAlive())
-                        {
-                            context.Repeat();
-                            return;
-                        }
-
-                CreatureAI::EnterEvadeMode();
-            });
+            StartEncounter();
 
             if (!summons.HasEntry(NPC_HAND_OF_THE_DECEIVER))
             {
                 me->RemoveAurasDueToSpell(SPELL_ANVEENA_ENERGY_DRAIN);
                 me->SummonCreature(NPC_KILJAEDEN, me->GetPositionX(), me->GetPositionY(), me->GetPositionZ() + 1.5f, 4.3f, TEMPSUMMON_MANUAL_DESPAWN);
-                me->SummonCreature(NPC_KALECGOS_KJ, 1726.80f, 661.43f, 138.65f, 3.95f, TEMPSUMMON_MANUAL_DESPAWN);
+                me->SummonCreature(NPC_KALECGOS_KJ, 1734.465f, 592.5678f, 142.3971f, 4.533074f, TEMPSUMMON_MANUAL_DESPAWN);
             }
         }
     }
@@ -233,11 +270,6 @@ struct boss_kiljaeden : public BossAI
     boss_kiljaeden(Creature* creature) : BossAI(creature, DATA_KILJAEDEN)
     {
         me->SetReactState(REACT_PASSIVE);
-
-        scheduler.SetValidator([this]
-        {
-            return !me->HasUnitState(UNIT_STATE_CASTING);
-        });
     }
 
     void InitializeAI() override
@@ -261,6 +293,8 @@ struct boss_kiljaeden : public BossAI
     void Reset() override
     {
         _phase = PHASE_NORMAL;
+        DoCastSelf(SPELL_KNOCKBACK, true);
+        DoCastSelf(SPELL_SWAT, true);
 
         ScheduleHealthCheckEvent(85, [&]{
             _phase = PHASE_DARKNESS;
@@ -453,23 +487,8 @@ struct boss_kiljaeden : public BossAI
                     float x = me->GetPositionX() + 18.0f * cos((i * 2.0f - 1.0f) * M_PI / 3.0f);
                     float y = me->GetPositionY() + 18.0f * std::sin((i * 2.0f - 1.0f) * M_PI / 3.0f);
                     if (Creature* orb = me->SummonCreature(NPC_SHIELD_ORB, x, y, 40.0f, 0, TEMPSUMMON_CORPSE_DESPAWN))
-                    {
-                        Movement::PointsArray movementArray;
-                        movementArray.push_back(G3D::Vector3(x, y, 40.0f));
-
-                        // generate movement array
-                        for (uint8 j = 1; j < 20; ++j)
-                        {
-                            x = me->GetPositionX() + 18.0f * cos(((i * 2.0f - 1.0f) * M_PI / 3.0f) + (j / 20.0f * 2 * M_PI));
-                            y = me->GetPositionY() + 18.0f * std::sin(((i * 2.0f - 1.0f) * M_PI / 3.0f) + (j / 20.0f * 2 * M_PI));
-                            movementArray.push_back(G3D::Vector3(x, y, 40.0f));
-                        }
-
-                        Movement::MoveSplineInit init(orb);
-                        init.MovebyPath(movementArray);
-                        init.SetCyclic();
-                        init.Launch();
-                    }
+                        orb->GetMotionMaster()->MoveCirclePath(me->GetPositionX(), me->GetPositionY(), 40.0f, 18.0f,
+                            false, 20, FORCED_MOVEMENT_FLY);
                 }
             }, 40s);
         }
@@ -714,8 +733,15 @@ struct npc_kalecgos_kj : public NullCreatureAI
 
     void DoAction(int32 param) override
     {
-        if (param == ACTION_START_POST_EVENT)
+        if (param == ACTION_START_AERIAL_SUPPORT)
         {
+            DoCastSelf(SPELL_ARCANE_BOLT, true);
+        }
+        else if (param == ACTION_START_POST_EVENT)
+        {
+            me->GetMotionMaster()->Clear();
+            me->GetMotionMaster()->MoveIdle();
+            me->RemoveAurasDueToSpell(SPELL_ARCANE_BOLT);
             me->SetCanFly(false);
             me->SetDisableGravity(false);
             me->CastSpell(me, SPELL_TELEPORT_AND_TRANSFORM, true);

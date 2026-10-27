@@ -21,7 +21,9 @@
 
 #include "AreaDefines.h"
 #include "BattlefieldWG.h"
+#include "ScriptMgr.h"
 #include "Chat.h"
+#include "GameGraveyard.h"
 #include "GameTime.h"
 #include "MapMgr.h"
 #include "Opcodes.h"
@@ -76,8 +78,6 @@ bool BattlefieldWG::SetupBattlefield()
     RegisterZone(ZoneId);
 
     Data32.resize(BATTLEFIELD_WG_DATA_MAX);
-
-    SaveTimer = 60000;
 
     // Init Graveyards
     SetGraveyardNumber(BATTLEFIELD_WG_GRAVEYARD_MAX);
@@ -189,37 +189,61 @@ bool BattlefieldWG::SetupBattlefield()
     }
 
     UpdateCounterVehicle(true);
+
+    // Schedule always-running periodic timers
+    _scheduler.Schedule(Milliseconds(RESURRECTION_INTERVAL),
+        BATTLEFIELD_TIMER_GROUP_RESURRECT, [this](TaskContext context)
+    {
+        ForEachPlayerInZone([this](Player* player)
+        {
+            if (!player->HasAura(SPELL_WAITING_FOR_RESURRECT))
+                return;
+
+            TeamId team = player->GetTeamId();
+            Unit* closestSpirit = nullptr;
+            float closestDist = -1.0f;
+            for (BfGraveyard* gy : GraveyardList)
+            {
+                if (!gy)
+                    continue;
+                Unit* spirit = ObjectAccessor::GetCreature(*player, gy->GetSpiritGuide(team));
+                if (!spirit)
+                    continue;
+                float dist = player->GetDistance(spirit);
+                if (closestDist < 0.0f || dist < closestDist)
+                {
+                    closestDist = dist;
+                    closestSpirit = spirit;
+                }
+            }
+
+            if (closestSpirit)
+                closestSpirit->CastSpell(closestSpirit, SPELL_SPIRIT_HEAL, true);
+
+            player->CastSpell(player, SPELL_RESURRECTION_VISUAL, true);
+            player->ResurrectPlayer(1.0f);
+            player->CastSpell(player, 6962, true);
+            player->CastSpell(player, SPELL_SPIRIT_HEAL_MANA, true);
+            player->SpawnCorpseBones(false);
+            player->RemoveAurasDueToSpell(SPELL_WAITING_FOR_RESURRECT);
+        });
+        context.Repeat();
+    });
+
+    _scheduler.Schedule(60s, BATTLEFIELD_TIMER_GROUP_SAVE, [this](TaskContext context)
+    {
+        sWorldState->setWorldState(WORLD_STATE_BATTLEFIELD_WG_ACTIVE, Active);
+        sWorldState->setWorldState(WORLD_STATE_BATTLEFIELD_WG_DEFENDER, DefenderTeam);
+        sWorldState->setWorldState(ClockWorldState[0], Timer);
+        context.Repeat();
+    });
+
     return true;
 }
 
 bool BattlefieldWG::Update(uint32 diff)
 {
-    bool result = Battlefield::Update(diff);
-    if (SaveTimer <= diff)
-    {
-        sWorldState->setWorldState(WORLD_STATE_BATTLEFIELD_WG_ACTIVE, Active);
-        sWorldState->setWorldState(WORLD_STATE_BATTLEFIELD_WG_DEFENDER, DefenderTeam);
-        sWorldState->setWorldState(ClockWorldState[0], Timer);
-        SaveTimer = 60 * IN_MILLISECONDS;
-    }
-    else
-        SaveTimer -= diff;
-
-    // Update Tenacity
-    if (IsWarTime())
-    {
-        if (TenacityUpdateTimer <= diff)
-        {
-            TenacityUpdateTimer = 10000;
-            if (!UpdateTenacityList.empty())
-                UpdateTenacity();
-            UpdateTenacityList.clear();
-        }
-        else
-            TenacityUpdateTimer -= diff;
-    }
-
-    return result;
+    return Battlefield::Update(diff);
 }
 
 void BattlefieldWG::OnBattleStart()
@@ -273,19 +297,7 @@ void BattlefieldWG::OnBattleStart()
         capturePoint->SetCapturePointData(capturePoint->GetCapturePointGo(),
             capturePoint->GetCapturePointGo()->GetEntry() == GO_WINTERGRASP_FACTORY_BANNER_SE || capturePoint->GetCapturePointGo()->GetEntry() == GO_WINTERGRASP_FACTORY_BANNER_SW ? GetAttackerTeam() : GetDefenderTeam());
 
-    for (uint8 team = 0; team < 2; ++team)
-        for (ObjectGuid const& guid : Players[team])
-        {
-            // Kick player in orb room, TODO: offline player ?
-            if (Player* player = ObjectAccessor::FindPlayer(guid))
-            {
-                float x, y, z;
-                player->GetPosition(x, y, z);
-                if (5500 > x && x > 5392 && y < 2880 && y > 2800 && z < 480)
-                    player->TeleportTo(MAP_NORTHREND, 5349.8686f, 2838.481f, 409.240f, 0.046328f);
-                SendInitWorldStatesTo(player);
-            }
-        }
+    SendInitWorldStatesToAll();
     // Initialize vehicle counter
     UpdateCounterVehicle(true);
     // Send start warning to all players
@@ -293,7 +305,14 @@ void BattlefieldWG::OnBattleStart()
 
     // Xinef: reset tenacity counter
     TenacityStack = 0;
-    TenacityUpdateTimer = 20000;
+
+    _scheduler.Schedule(20s, BATTLEFIELD_TIMER_GROUP_WAR, [this](TaskContext context)
+    {
+        if (!UpdateTenacityList.empty())
+            UpdateTenacity();
+        UpdateTenacityList.clear();
+        context.Repeat(10s);
+    });
 
     if (sWorld->getBoolConfig(CONFIG_BATTLEGROUND_QUEUE_ANNOUNCER_ENABLE))
         ChatHandler(nullptr).SendWorldText(BATTLEFIELD_WG_WORLD_START_MESSAGE);
@@ -348,6 +367,9 @@ void BattlefieldWG::CapturePointTaken(uint32 areaId)
 
 void BattlefieldWG::OnBattleEnd(bool endByTimer)
 {
+    // Must be set before SPELL_VICTORY_REWARD so the 1755 criterion can gate on it.
+    LastBattleAttackerVictory = !endByTimer;
+
     // Remove relic
     if (GameObject* go = GetRelic())
         go->RemoveFromWorld();
@@ -458,11 +480,16 @@ void BattlefieldWG::OnBattleEnd(bool endByTimer)
         }
     }
 
+    bool const grantEssenceToAttackers = sWorld->getBoolConfig(CONFIG_WINTERGRASP_ESSENCE_BOTH_FACTIONS);
+
     for (ObjectGuid const& guid : PlayersInWar[GetAttackerTeam()])
         if (Player* player = ObjectAccessor::FindPlayer(guid))
         {
             player->CastSpell(player, SPELL_DEFEAT_REWARD, true);
             RemoveAurasFromPlayer(player);
+
+            if (grantEssenceToAttackers)
+                player->CastSpell(player, SPELL_ESSENCE_OF_WINTERGRASP, true);
 
             for (uint8 i = 0; i < damagedTowersAtt; ++i)
                 player->CastSpell(player, spellDamagedAtt, true);
@@ -552,6 +579,47 @@ uint32 BattlefieldWG::GetAreaByGraveyardId(uint8 gId) const
     }
 
     return 0;
+}
+
+void BattlefieldWG::RelocateDeadPlayers(uint8 graveyardId, TeamId losingTeam)
+{
+    // Nobody could use the graveyard before the change, so nobody is left waiting on it.
+    if (losingTeam == TEAM_NEUTRAL)
+        return;
+
+    BfGraveyard const* graveyard = GetGraveyardById(graveyardId);
+    if (!graveyard)
+        return;
+
+    GraveyardStruct const* capturedLoc = sGraveyard->GetGraveyard(graveyard->GetGraveyardId());
+    if (!capturedLoc)
+        return;
+
+    ForEachPlayerInZone([this, capturedLoc, losingTeam](Player* player)
+    {
+        // Only the team that just lost it. The other team could never have released here, since
+        // RepopAtGraveyard picks a graveyard their own team holds, so they are passers-by.
+        if (player->GetTeamId() != losingTeam)
+            return;
+
+        // Ghosts only. Skips the living, and corpses that RepopAtGraveyard will send to a
+        // graveyard their team holds once they release.
+        if (!player->HasPlayerFlag(PLAYER_FLAGS_GHOST))
+            return;
+
+        // Only ghosts waiting at this graveyard, not elsewhere in the zone.
+        if (player->GetDistance2d(capturedLoc->x, capturedLoc->y) > 50.0f)
+            return;
+
+        GraveyardStruct const* safeLoc = GetClosestGraveyard(player);
+        if (!safeLoc)
+            return;
+
+        player->TeleportTo(safeLoc->Map, safeLoc->x, safeLoc->y, safeLoc->z, player->GetOrientation());
+
+        // The spirit guides here are phased out for them now, so they can't queue themselves.
+        AddPlayerToResurrectQueue(ObjectGuid::Empty, player->GetGUID());
+    });
 }
 
 void BattlefieldWG::OnCreatureCreate(Creature* creature)
@@ -723,16 +791,19 @@ void BattlefieldWG::HandleKill(Player* killer, Unit* victim)
     // xinef: tower cannons also grant rank
     if (victim->IsPlayer() || IsKeepNpc(victim->GetEntry()) || victim->GetEntry() == NPC_WINTERGRASP_TOWER_CANNON)
     {
-        if (victim->IsPlayer() && victim->HasAura(SPELL_LIEUTENANT))
+        if (Player* victimPlayer = victim->ToPlayer())
         {
-            // Quest - Wintergrasp - PvP Kill - Horde/Alliance
-            for (ObjectGuid const& playerGuid : PlayersInWar[killerTeam])
+            sScriptMgr->OnBattlefieldPlayerKill(this, killer, victimPlayer);
+
+            if (victimPlayer->HasAura(SPELL_LIEUTENANT))
             {
-                if (Player* player = ObjectAccessor::FindPlayer(playerGuid))
+                // Quest - Wintergrasp - PvP Kill - Horde/Alliance
+                for (ObjectGuid const& playerGuid : PlayersInWar[killerTeam])
                 {
-                    if (player->GetDistance2d(killer) < 40)
+                    if (Player* player = ObjectAccessor::FindPlayer(playerGuid))
                     {
-                        player->KilledMonsterCredit(killerTeam == TEAM_HORDE ? NPC_QUEST_PVP_KILL_ALLIANCE : NPC_QUEST_PVP_KILL_HORDE);
+                        if (player->GetDistance2d(killer) < 40)
+                            player->KilledMonsterCredit(killerTeam == TEAM_HORDE ? NPC_QUEST_PVP_KILL_ALLIANCE : NPC_QUEST_PVP_KILL_HORDE);
                     }
                 }
             }
@@ -905,8 +976,8 @@ void BattlefieldWG::OnPlayerEnterZone(Player* player)
     // Send worldstate to player
     SendInitWorldStatesTo(player);
 
-    // xinef: Attacker, if hidden in relic room kick him out
-    if (player->GetTeamId() == GetAttackerTeam())
+    // xinef: Attacker, if hidden in relic room kick him out (only during wartime)
+    if (IsWarTime() && player->GetTeamId() == GetAttackerTeam())
         if (player->GetPositionX() > 5400.0f && player->GetPositionX() < 5490.0f && player->GetPositionY() > 2803.0f && player->GetPositionY() < 2878.0f)
             KickPlayerFromBattlefield(player->GetGUID());
 }

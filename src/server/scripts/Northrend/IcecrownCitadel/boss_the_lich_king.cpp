@@ -354,9 +354,14 @@ enum MiscData
 #define DATA_PLAGUE_STACK 70337
 #define DATA_VILE 45814622
 
+bool IsValidPlatformPosition(Position const& pos)
+{
+    return pos.GetExactDist2dSq(&CenterPosition) < 90.0f * 90.0f && pos.GetPositionZ() > 840.0f && pos.GetPositionZ() < 875.0f;
+}
+
 bool IsValidPlatformTarget(Unit const* target)
 {
-    return target->GetExactDist2dSq(&CenterPosition) < 90.0f * 90.0f && target->GetPositionZ() > 840.0f && target->GetPositionZ() < 875.0f;
+    return IsValidPlatformPosition(*target);
 }
 
 void SendPacketToPlayers(WorldPacket const* data, Unit* source)
@@ -498,7 +503,7 @@ public:
     bool Execute(uint64 /*time*/, uint32 /*diff*/) override
     {
         _owner->SetReactState(REACT_AGGRESSIVE);
-        if (!_owner->GetThreatMgr().isThreatListEmpty())
+        if (!_owner->GetThreatMgr().IsThreatListEmpty())
             if (Unit* target = _owner->SelectVictim())
                 _owner->AI()->AttackStart(target);
         if (!_owner->GetVictim())
@@ -638,7 +643,6 @@ public:
         uint32 _necroticPlagueStack;
         uint32 _vileSpiritExplosions;
         uint16 _positionCheckTimer;
-        uint32 _lastTalkTimeKill;
         uint32 _lastTalkTimeBuff;
         bool _bFrostmournePhase;
         bool _bFordringMustFallYell;
@@ -649,10 +653,11 @@ public:
             _necroticPlagueStack = 0;
             _vileSpiritExplosions = 0;
             _positionCheckTimer = 5000;
-            _lastTalkTimeKill = 0;
             _lastTalkTimeBuff = 0;
             _bFrostmournePhase = false;
             _bFordringMustFallYell = false;
+            me->SetRegeneratingHealth(true);
+            me->SetIsCombatDisallowed(false);
 
             _Reset();
             DoAction(ACTION_RESTORE_LIGHT);
@@ -719,11 +724,8 @@ public:
 
         void KilledUnit(Unit* victim) override
         {
-            if (victim->IsPlayer() && !me->IsInEvadeMode() && _phase != PHASE_OUTRO && _lastTalkTimeKill + 5 < GameTime::GetGameTime().count())
-            {
-                _lastTalkTimeKill = GameTime::GetGameTime().count();
-                Talk(SAY_LK_KILL);
-            }
+            if (!me->IsInEvadeMode() && _phase != PHASE_OUTRO)
+                Talk(SAY_LK_KILL, victim);
         }
 
         void DoAction(int32 action) override
@@ -792,12 +794,15 @@ public:
             if (_phase == PHASE_THREE && HealthBelowPct(10) && !me->HasUnitState(UNIT_STATE_CASTING))
             {
                 _phase = PHASE_OUTRO;
+                me->SetRegeneratingHealth(false);
+                me->SetIsCombatDisallowed(true);
                 EntryCheckPredicate pred(NPC_STRANGULATE_VEHICLE);
                 summons.DoAction(ACTION_TELEPORT_BACK, pred);
                 events.Reset();
                 summons.DespawnAll();
                 me->SetReactState(REACT_PASSIVE);
                 me->AttackStop();
+                me->CombatStop(true);
                 me->GetMap()->SetZoneMusic(AREA_THE_FROZEN_THRONE, MUSIC_FURY_OF_FROSTMOURNE);
                 me->InterruptNonMeleeSpells(true);
                 me->CastSpell((Unit*)nullptr, SPELL_FURY_OF_FROSTMOURNE, false);
@@ -1180,7 +1185,7 @@ public:
                         {
                             if (summon->GetEntry() == NPC_VILE_SPIRIT)
                             {
-                                summon->m_Events.KillAllEvents(true);
+                                summon->m_Events.KillAllEvents(false);
                                 summon->m_Events.AddEventAtOffset(new VileSpiritActivateEvent(summon), 55s);
                                 summon->GetMotionMaster()->Clear(true);
                                 summon->StopMoving();
@@ -1253,6 +1258,9 @@ public:
 
         void EnterEvadeMode(EvadeReason why) override
         {
+            if (_phase == PHASE_OUTRO || _phase == PHASE_FROSTMOURNE)
+                return;
+
             EntryCheckPredicate pred(NPC_STRANGULATE_VEHICLE);
             summons.DoAction(ACTION_TELEPORT_BACK, pred);
             instance->SetBossState(DATA_THE_LICH_KING, FAIL);
@@ -2234,8 +2242,12 @@ public:
             }
         }
 
-        void IsSummonedBy(WorldObject* /*summoner*/) override
+        void IsSummonedBy(WorldObject* summoner) override
         {
+            // no floor under the summon destination drops the spirit to the terrain, ~990 yd below the platform
+            if (summoner && !IsValidPlatformPosition(*me) && IsValidPlatformPosition(*summoner))
+                me->NearTeleportTo(summoner->GetPositionX(), summoner->GetPositionY(), summoner->GetPositionZ(), me->GetOrientation());
+
             // player is the spellcaster so register summon manually
             if (Creature* lichKing = ObjectAccessor::GetCreature(*me, _instance->GetGuidData(DATA_THE_LICH_KING)))
                 lichKing->AI()->JustSummoned(me);
@@ -2273,7 +2285,7 @@ public:
                     {
                         me->SetControlled(false, UNIT_STATE_ROOT);
 
-                        if (!me->GetThreatMgr().isThreatListEmpty())
+                        if (!me->GetThreatMgr().IsThreatListEmpty())
                             if (Unit* target = me->SelectVictim())
                                 AttackStart(target);
                         if (!me->GetVictim())

@@ -22,6 +22,7 @@
 #include "MySQLPreparedStatement.h"
 #include "PreparedStatement.h"
 #include "QueryResult.h"
+#include "SQLOperation.h"
 #include "StringConvert.h"
 #include "Timer.h"
 #include "Tokenize.h"
@@ -399,7 +400,7 @@ int MySQLConnection::ExecuteTransaction(std::shared_ptr<TransactionBase> transac
                 {
                     stmt = std::get<PreparedStatementBase*>(data.element);
                 }
-                catch (const std::bad_variant_access& ex)
+                catch (std::bad_variant_access const& ex)
                 {
                     LOG_FATAL("sql.sql", "> PreparedStatementBase not found in SQLElementData. {}", ex.what());
                     ABORT();
@@ -424,7 +425,7 @@ int MySQLConnection::ExecuteTransaction(std::shared_ptr<TransactionBase> transac
                 {
                     sql = std::get<std::string>(data.element);
                 }
-                catch (const std::bad_variant_access& ex)
+                catch (std::bad_variant_access const& ex)
                 {
                     LOG_FATAL("sql.sql", "> std::string not found in SQLElementData. {}", ex.what());
                     ABORT();
@@ -453,7 +454,7 @@ int MySQLConnection::ExecuteTransaction(std::shared_ptr<TransactionBase> transac
     return 0;
 }
 
-std::size_t MySQLConnection::EscapeString(char* to, const char* from, std::size_t length)
+std::size_t MySQLConnection::EscapeString(char* to, char const* from, std::size_t length)
 {
     return mysql_real_escape_string(m_Mysql, to, from, length);
 }
@@ -461,6 +462,12 @@ std::size_t MySQLConnection::EscapeString(char* to, const char* from, std::size_
 void MySQLConnection::Ping()
 {
     mysql_ping(m_Mysql);
+}
+
+bool PingOperation::Execute()
+{
+    m_conn->Ping();
+    return true;
 }
 
 uint32 MySQLConnection::GetLastError()

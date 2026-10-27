@@ -219,7 +219,7 @@ bool ItemCanGoIntoBag(ItemTemplate const* proto, ItemTemplate const* pBagProto);
 class Item : public Object
 {
 public:
-    static Item* CreateItem(uint32 item, uint32 count, Player const* player = nullptr, bool clone = false, uint32 randomPropertyId = 0, bool temp = false);
+    static Item* CreateItem(uint32 item, uint32 count, Player const* player = nullptr, bool clone = false, uint32 randomPropertyId = 0);
     Item* CloneItem(uint32 count, Player const* player = nullptr) const;
 
     Item();
@@ -248,7 +248,7 @@ public:
     void DeleteRefundDataFromDB(CharacterDatabaseTransaction* trans);
 
     Bag* ToBag() { if (IsBag()) return reinterpret_cast<Bag*>(this); else return nullptr; }
-    [[nodiscard]] const Bag* ToBag() const { if (IsBag()) return reinterpret_cast<const Bag*>(this); else return nullptr; }
+    [[nodiscard]] Bag const* ToBag() const { if (IsBag()) return reinterpret_cast<Bag const*>(this); else return nullptr; }
 
     [[nodiscard]] bool IsLocked() const { return !HasFlag(ITEM_FIELD_FLAGS, ITEM_FIELD_FLAG_UNLOCKED); }
     [[nodiscard]] bool IsBag() const { return GetTemplate()->InventoryType == INVTYPE_BAG; }

@@ -154,7 +154,9 @@ void WorldSession::HandleCalendarGetCalendar(WorldPacket& /*recvData*/)
     data.append(dataBuffer);
 
     /// @todo: Fix this, how we do know how many and what holidays to send?
-    data << uint32(sGameEventMgr->ModifiedHolidays.size());
+    uint32 holidayCounter = 0;
+    dataBuffer.clear();
+
     for (uint32 entry : sGameEventMgr->ModifiedHolidays)
     {
         HolidaysEntry const* holiday = sHolidaysStore.LookupEntry(entry);
@@ -164,23 +166,28 @@ void WorldSession::HandleCalendarGetCalendar(WorldPacket& /*recvData*/)
             continue;
         }
 
-        data << uint32(holiday->Id);                        // m_ID
-        data << uint32(holiday->Region);                    // m_region, might be looping
-        data << uint32(holiday->Looping);                   // m_looping, might be region
-        data << uint32(holiday->Priority);                  // m_priority
-        data << uint32(holiday->CalendarFilterType);        // m_calendarFilterType
+        dataBuffer << uint32(holiday->Id);                  // m_ID
+        dataBuffer << uint32(holiday->Region);              // m_region, might be looping
+        dataBuffer << uint32(holiday->Looping);             // m_looping, might be region
+        dataBuffer << uint32(holiday->Priority);            // m_priority
+        dataBuffer << uint32(holiday->CalendarFilterType);  // m_calendarFilterType
 
         for (uint8 j = 0; j < MAX_HOLIDAY_DATES; ++j)
-            data << uint32(holiday->Date[j]);               // 26 * m_date -- WritePackedTime ?
+            dataBuffer << uint32(holiday->Date[j]);         // 26 * m_date -- WritePackedTime ?
 
         for (uint8 j = 0; j < MAX_HOLIDAY_DURATIONS; ++j)
-            data << uint32(holiday->Duration[j]);           // 10 * m_duration
+            dataBuffer << uint32(holiday->Duration[j]);     // 10 * m_duration
 
         for (uint8 j = 0; j < MAX_HOLIDAY_FLAGS; ++j)
-            data << uint32(holiday->CalendarFlags[j]);      // 10 * m_calendarFlags
+            dataBuffer << uint32(holiday->CalendarFlags[j]); // 10 * m_calendarFlags
 
-        data << holiday->TextureFilename;                   // m_textureFilename (holiday name)
+        dataBuffer << holiday->TextureFilename;             // m_textureFilename (holiday name)
+
+        ++holidayCounter;
     }
+
+    data << uint32(holidayCounter);
+    data.append(dataBuffer);
 
     SendPacket(&data);
 }
@@ -754,11 +761,21 @@ void WorldSession::HandleCalendarEventModeratorStatus(WorldPacket& recvData)
 
 void WorldSession::HandleCalendarComplain(WorldPackets::Calendar::CalendarComplain& packet)
 {
-    ObjectGuid guid = _player->GetGUID();
+    if (sWorld->getBoolConfig(CONFIG_LOGSPAMREPORTS))
+    {
+        CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_INS_SPAM_REPORT);
 
-    LOG_DEBUG("network", "CMSG_CALENDAR_COMPLAIN [{}] EventId [{}] guid [{}]", guid.ToString(), packet.EventId, packet.ComplainGuid.ToString());
+        stmt->SetData(0, 2); // SpamType 2 = Calendar
+        stmt->SetData(1, packet.ComplainGuid.GetCounter());
+        stmt->SetData(2, 0);
+        stmt->SetData(3, 0);
+        stmt->SetData(4, 0);
+        stmt->SetData(5, 0);
+        stmt->SetData(6, "EventId: " + std::to_string(packet.EventId));
+        stmt->SetData(7, GameTime::GetGameTime().count());
 
-    // what to do with complains?
+        CharacterDatabase.Execute(stmt);
+    }
 }
 
 void WorldSession::HandleCalendarGetNumPending(WorldPacket& /*recvData*/)
